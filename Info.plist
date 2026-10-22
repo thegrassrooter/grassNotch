@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>grassIsland</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.grassisland.app</string>
+	<key>CFBundleName</key>
+	<string>grassIsland</string>
+	<key>NSFocusStatusUsageDescription</key>
+	<string>Dynamic Notch uses your Focus status to briefly show when Do Not Disturb or another Focus mode changes.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Dynamic Notch checks Bluetooth power changes to briefly show the Bluetooth status in the notch.</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleIconFile</key>
+	<string>grassIsland.icns</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
