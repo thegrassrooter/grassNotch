@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:grassIsland}",
+            "name": "Debug grassIsland",
+            "target": "grassIsland",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug grassIsland"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:grassIsland}",
+            "name": "Release grassIsland",
+            "target": "grassIsland",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release grassIsland"
+        }
+    ]
+}

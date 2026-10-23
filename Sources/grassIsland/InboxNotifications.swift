@@ -4,7 +4,21 @@ import UserNotifications
 
 /// Delivers incoming inbox messages through the system Notification Center.
 enum InboxNotifications {
+    /// UserNotifications requires the process to have a registered .app bundle.
+    /// A bare `swift run` executable has no bundle proxy, and asking for the
+    /// system notification center in that process raises an Objective-C
+    /// exception instead of returning an error.
+    static var hasApplicationBundle: Bool {
+        let bundle = Bundle.main
+        return bundle.bundleURL.pathExtension == "app"
+            && bundle.object(forInfoDictionaryKey: "CFBundleIdentifier") as? String == "com.grassisland.app"
+    }
+
     static func configure() {
+        guard hasApplicationBundle else {
+            NSLog("[InboxNotifications] skipped: system notifications require the packaged grassIsland.app bundle")
+            return
+        }
         let center = UNUserNotificationCenter.current()
         center.delegate = NotificationDelegate.shared
         center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
@@ -57,6 +71,9 @@ enum InboxNotifications {
         if let bundled = Bundle.main.url(forResource: name, withExtension: "png") {
             return bundled
         }
+        if let packaged = Bundle.module.url(forResource: name, withExtension: "png", subdirectory: "Assets") {
+            return packaged
+        }
         let developmentURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("Resources", isDirectory: true)
             .appendingPathComponent("\(name).png")
@@ -67,6 +84,9 @@ enum InboxNotifications {
         let name = service.caseInsensitiveCompare("Gmail") == .orderedSame ? "gmail" : "whatsapp"
         if let bundled = Bundle.main.url(forResource: name, withExtension: "jpg") {
             return bundled
+        }
+        if let packaged = Bundle.module.url(forResource: name, withExtension: "jpg", subdirectory: "Assets") {
+            return packaged
         }
         let developmentURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("Resources", isDirectory: true)
@@ -79,6 +99,7 @@ enum InboxNotifications {
     }
 
     static func post(_ message: InboxMessage) {
+        guard hasApplicationBundle else { return }
         let request = UNNotificationRequest(
             identifier: message.id,
             content: content(for: message),
@@ -99,6 +120,9 @@ enum InboxNotifications {
 
     @MainActor
     static func runSmokeTest() async -> (Bool, String) {
+        guard hasApplicationBundle else {
+            return (false, "System notifications require the packaged grassIsland.app bundle.")
+        }
         let center = UNUserNotificationCenter.current()
         var settings = await center.notificationSettings()
         if settings.authorizationStatus == .notDetermined {

@@ -1,53 +1,29 @@
-🌱 grassNotch
+# grassNotch for macOS
 
-A Dynamic Island-inspired experience for macOS.
+grassNotch is a native macOS menu-bar/notch app built with Swift and SwiftUI.
 
-grassNotch brings a little more life to your MacBook's notch, with a sleek interface designed to make everyday interactions feel more natural.
+## Run from source
 
-🚧 Status: In Development
+Requirements: macOS 15 or later and Swift 6.4 or later from Xcode or Apple's Command Line Tools.
 
-grassNotch is currently a work in progress. Features, appearance, and compatibility may change as development continues.
+1. Unzip the project.
+2. Open Terminal and change into the unzipped project folder.
+3. Run:
 
-✨ Features
+   ```sh
+   swift run
+   ```
 
-Features currently implemented or planned for grassNotch:
+The first run compiles the app. Keep Terminal open while using it; press Control-C in that Terminal to stop it. macOS may ask for Automation or Accessibility access for features that inspect or control other apps.
 
-🌱 Dynamic Notch Interface — An interactive experience built around the MacBook's notch.
-🎨 Custom UI — A clean, modern interface inspired by Apple's design language.
-⚡ Native macOS App — Built with Swift and SwiftUI.
-🛠️ Actively Developed — New features and improvements are in progress.
+When started with `swift run`, grassNotch runs as a SwiftPM executable. macOS requires a registered `.app` bundle for Notification Center delivery and usage-description-backed Focus/Bluetooth access. Gmail and WhatsApp items can still appear in the notch, but native Notification Center alerts and Focus/Bluetooth indicators require the packaged app.
 
-More features will be documented here as development progresses.
+## Build the packaged app
 
-🖥️ Compatibility
-Platform: macOS
-Architecture: Apple silicon (M-series Macs; compatibility to be verified)
-Requirements: To be confirmed
-📥 Installation
+To create a local `.app` bundle with the app icon and native Notification Center support, run:
 
-Installation instructions will be added when a downloadable build is available.
+```sh
+./scripts/package-app.sh
+```
 
-For now, you can explore the source code in this repository.
-
-🛣️ Roadmap
-Refine animations and transitions
-Improve the overall user experience
-Add more interactive features
-Improve compatibility and stability
-Publish downloadable releases
-🧑‍💻 Built With
-Swift
-SwiftUI
-🤝 Contributing
-
-Suggestions, bug reports, and ideas are welcome!
-
-If you'd like to contribute, open an issue to discuss your idea before submitting major changes.
-
-📄 License
-
-No license has been specified yet. Until a license is added, all rights are reserved by the copyright holder.
-
-Made with 🌱 for macOS.
-
-grassNotch — a little more life in your notch.
+The app is written to `.build/out/Products/Debug/grassIsland.app`. This project ZIP is an unsigned source distribution; sharing it does not include Developer ID signing or Apple notarization. Recipients can build and run the source with `swift run` as described above.

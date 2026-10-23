@@ -14,6 +14,9 @@ let package = Package(
         )
     ],
     targets: [
-        .executableTarget(name: "grassIsland")
+        .executableTarget(
+            name: "grassIsland",
+            resources: [.copy("Assets")]
+        )
     ]
 )

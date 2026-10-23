@@ -8,6 +8,7 @@ import Intents
 import Network
 import QuickLookThumbnailing
 import IOBluetooth
+import SwiftUI
 
 // MARK: - Screen
 
@@ -92,6 +93,10 @@ enum SystemBluetooth {
     static let alertHeight: CGFloat = 34
 
     static func isPoweredOn() -> Bool? {
+        // Accessing IOBluetoothHostController from a bare `swift run`
+        // executable can trigger a TCC privacy termination because that
+        // process has no app Info.plist usage description.
+        guard InboxNotifications.hasApplicationBundle else { return nil }
         guard let controller = IOBluetoothHostController.default() else { return nil }
         switch controller.powerState {
         case kBluetoothHCIPowerStateON:
@@ -391,9 +396,9 @@ enum ChromeYouTube {
         let js: String
         switch action {
         case "play":
-            js = "(() => { const shortVideo = document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video'); const v = shortVideo || document.querySelector('video.html5-main-video') || Array.from(document.querySelectorAll('video')).find(x => x.readyState >= 1) || document.querySelector('video'); if (!v) return 'NO_VIDEO'; if (!v.paused && !v.ended) return 'PLAYING'; const p = v.play(); if (p && p.catch) p.catch(() => {}); return 'PLAY_REQUESTED'; })()"
+            js = "(() => { const shortPage = location.pathname.startsWith('/shorts/'); const player = document.getElementById('movie_player'); const shortVideo = shortPage ? (document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video')) : null; const v = shortVideo || player?.querySelector('video.html5-main-video') || document.querySelector('video.html5-main-video') || Array.from(document.querySelectorAll('video')).find(x => x.readyState >= 1) || document.querySelector('video'); if (!v) return 'NO_VIDEO'; if (!shortPage && player && typeof player.playVideo === 'function') { player.playVideo(); return 'PLAY_REQUESTED'; } if (!v.paused && !v.ended) return 'PLAYING'; const p = v.play(); if (p && p.catch) p.catch(() => {}); return 'PLAY_REQUESTED'; })()"
         case "pause":
-            js = "(() => { const shortVideo = document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video'); const v = shortVideo || document.querySelector('video.html5-main-video') || Array.from(document.querySelectorAll('video')).find(x => !x.paused && !x.ended) || document.querySelector('video'); if (!v) return 'NO_VIDEO'; v.pause(); return 'PAUSED'; })()"
+            js = "(() => { const shortPage = location.pathname.startsWith('/shorts/'); const player = document.getElementById('movie_player'); const shortVideo = shortPage ? (document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video')) : null; const v = shortVideo || player?.querySelector('video.html5-main-video') || document.querySelector('video.html5-main-video') || Array.from(document.querySelectorAll('video')).find(x => !x.paused && !x.ended) || document.querySelector('video'); if (!v) return 'NO_VIDEO'; if (!shortPage && player && typeof player.pauseVideo === 'function') { player.pauseVideo(); return 'PAUSED'; } v.pause(); return 'PAUSED'; })()"
         case "seek":
             let safe = max(-3600, min(3600, seekSeconds))
             js = "(() => { const shortVideo = document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video'); const v = shortVideo || document.querySelector('video.html5-main-video') || Array.from(document.querySelectorAll('video')).find(x => !x.paused && !x.ended) || document.querySelector('video'); if (!v) return 'NO_VIDEO'; const next = Math.max(0, Math.min(Number.isFinite(v.duration) ? v.duration : Infinity, v.currentTime + (\(safe)))); try { v.currentTime = next; } catch (_) {} v.dispatchEvent(new Event('seeking')); return 'SEEK'; })()"
@@ -893,6 +898,10 @@ enum WhatsAppMonitor {
 
 @MainActor
 final class NotchView: NSView, NSDraggingSource {
+    // Use an explicit opaque sRGB zero so the notch surface never inherits a
+    // dynamic system color or an alpha-tinted black from the current appearance.
+    private static let pitchBlack = NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
+
     var volume: Float = 0.5 { didSet { needsDisplay = true } }
     var volumeHUD = false { didSet { needsDisplay = true } }
     var volumeHUDOpacity: CGFloat = 0 { didSet { needsDisplay = true } }
@@ -953,6 +962,7 @@ final class NotchView: NSView, NSDraggingSource {
     var whatsAppOverflowCount = 0 { didSet { needsDisplay = true } }
 
     var onToggleExpanded: (@MainActor () -> Void)?
+    var onDeveloperModeClick: (@MainActor (_ shiftHeld: Bool) -> Void)?
     var onControlClickLock: (@MainActor () -> Void)?
     var onAcceptWhatsAppCall: (@MainActor () -> Void)?
     var onDeclineWhatsAppCall: (@MainActor () -> Void)?
@@ -1034,6 +1044,18 @@ final class NotchView: NSView, NSDraggingSource {
         return path
     }
 
+    /// Paint the surface directly into the backing context with opaque sRGB
+    /// zero, bypassing dynamic colors and alpha-based compositing entirely.
+    private func fillPitchBlack(_ path: NSBezierPath) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        context.setBlendMode(.copy)
+        context.setFillColor(Self.pitchBlack.cgColor)
+        context.addPath(path.cgPath)
+        context.fillPath()
+        context.restoreGState()
+    }
+
     private func drawText(
         _ string: String,
         x: CGFloat,
@@ -1098,8 +1120,7 @@ final class NotchView: NSView, NSDraggingSource {
             return
         }
 
-        NSColor.black.setFill()
-        notchPath(in: bounds).fill()
+        fillPitchBlack(notchPath(in: bounds))
 
         if whatsAppInCall {
             drawWhatsAppInCall(in: bounds)
@@ -1162,8 +1183,7 @@ final class NotchView: NSView, NSDraggingSource {
     }
 
     private func drawFileDrop(in bounds: NSRect) {
-        NSColor.black.setFill()
-        notchPath(in: bounds, cornerRadius: 22).fill()
+        fillPitchBlack(notchPath(in: bounds, cornerRadius: 22))
 
         let visibleHeight = max(0, bounds.height - (NSScreen.notchScreen?.safeAreaInsets.top ?? 34))
         guard let fileDropURL else {
@@ -1200,8 +1220,7 @@ final class NotchView: NSView, NSDraggingSource {
     }
 
     private func drawNoNetworkAlert(in bounds: NSRect) {
-        NSColor.black.setFill()
-        notchPath(in: bounds, cornerRadius: 22).fill()
+        fillPitchBlack(notchPath(in: bounds, cornerRadius: 22))
         let safeTop = NSScreen.notchScreen?.safeAreaInsets.top ?? 34
         let visibleHeight = max(0, bounds.height - safeTop)
         guard let symbol = NSImage(systemSymbolName: "wifi.slash", accessibilityDescription: "No network") else { return }
@@ -1212,16 +1231,14 @@ final class NotchView: NSView, NSDraggingSource {
     }
 
     private func drawLowBatteryAlert(_ percent: Int, in bounds: NSRect) {
-        NSColor.black.setFill()
-        notchPath(in: bounds).fill()
+        fillPitchBlack(notchPath(in: bounds))
         let y = bounds.midY - 6
         drawText("\(percent)%", x: 15, y: y, size: 10, weight: .bold, color: .systemRed)
         drawText("Low Battery", x: bounds.maxX - 82, y: y, size: 10, weight: .bold, color: .systemRed)
     }
 
     private func drawBluetoothAlert(_ isPoweredOn: Bool, in bounds: NSRect) {
-        NSColor.black.setFill()
-        notchPath(in: bounds).fill()
+        fillPitchBlack(notchPath(in: bounds))
 
         let wingWidth = max(0, (bounds.width - SystemBluetooth.physicalNotchWidth) / 2)
         let iconCenterX = wingWidth / 2
@@ -1263,8 +1280,7 @@ final class NotchView: NSView, NSDraggingSource {
     }
 
     private func drawFocusAlert(_ isFocused: Bool, in bounds: NSRect) {
-        NSColor.black.setFill()
-        notchPath(in: bounds).fill()
+        fillPitchBlack(notchPath(in: bounds))
 
         guard let moon = NSImage(
             systemSymbolName: "moon.fill",
@@ -1353,8 +1369,7 @@ final class NotchView: NSView, NSDraggingSource {
     }
 
     private func drawInboxNotification(_ message: InboxMessage, in bounds: NSRect) {
-        NSColor.black.setFill()
-        notchPath(in: bounds, cornerRadius: 22).fill()
+        fillPitchBlack(notchPath(in: bounds, cornerRadius: 22))
 
         // The physical notch covers the top safe-area strip of this window.
         // Lay out all message text in the visible body below that strip.
@@ -1445,8 +1460,7 @@ final class NotchView: NSView, NSDraggingSource {
         )
         path.line(to: NSPoint(x: 0, y: height))
         path.close()
-        NSColor.black.setFill()
-        path.fill()
+        fillPitchBlack(path)
 
         let messages = Array(whatsAppMessages.prefix(4))
         guard !messages.isEmpty else { return }
@@ -1814,8 +1828,7 @@ final class NotchView: NSView, NSDraggingSource {
         // A restrained inset surface gives the controls a clear hierarchy while
         // preserving the black notch silhouette around it.
         let surface = NSRect(x: 7, y: 7, width: width - 14, height: height - 14)
-        NSColor.black.setFill()
-        NSBezierPath(roundedRect: surface, xRadius: 21, yRadius: 21).fill()
+        fillPitchBlack(NSBezierPath(roundedRect: surface, xRadius: 21, yRadius: 21))
 
         // Compact top metadata row, spaced away from the thumbnail/title row.
         drawText(currentTimeText, x: 19, y: height - 28, size: 10, weight: .semibold)
@@ -2044,6 +2057,11 @@ final class NotchView: NSView, NSDraggingSource {
         let loc = NSPoint(x: viewPoint.x, y: viewPoint.y - Self.dragCaptureHeight)
         guard bounds.contains(loc) else { return }
 
+        if event.modifierFlags.contains(.option) {
+            onDeveloperModeClick?(event.modifierFlags.contains(.shift))
+            return
+        }
+
         if let fileDropURL {
             for index in 0..<4 where Self.fileActionRect(index: index, in: bounds).contains(loc) {
                 onFileAction?(["airdrop", "copy", "rename", "delete"][index], fileDropURL)
@@ -2267,6 +2285,10 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
     private var panel: NSPanel!
     private var notch: NotchView!
+    private let developerMode = DeveloperModeManager()
+    private var developerHost: DeveloperHostingView?
+    private var developerSessionObservers: [NSObjectProtocol] = []
+    private var lastDeveloperPermissionStates: [String: String] = [:]
     private var incomingNotificationQueue: [InboxMessage] = []
     private var pendingNotificationFingerprints = Set<String>()
     private var incomingNotificationTimer: Timer?
@@ -2295,7 +2317,9 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private let idleWidth: CGFloat = 210
     private let activeWidth: CGFloat = 360
     private let appSwitchWidth: CGFloat = 294
-    private let appSwitchExpansionDuration: TimeInterval = 0.38
+    private var appSwitchExpansionDuration: TimeInterval {
+        DeveloperAnimationSettings.shared.effectiveExpansionDuration
+    }
     private let cardWidth: CGFloat = 246
     private let multiMessageBaseWidth: CGFloat = 258
 
@@ -2306,6 +2330,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
     private var currentWidth: CGFloat = 210
     private var currentHeight: CGFloat = 34 + NotchView.dragCaptureHeight
+    private var resizeAnimationGeneration = 0
 
     private var lastVolume: Float?
     private var appSwitchTimer: Timer?
@@ -2380,6 +2405,29 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
         panel.contentView = notch
 
+        developerHost = DeveloperHostingView(rootView: DeveloperOverlayRoot(
+            manager: developerMode,
+            snapshotProvider: { [weak self] in await self?.makeDeveloperSnapshot() ?? .environment },
+            playbackAction: { [weak self] shouldPlay in self?.developerSetPlayback(shouldPlay: shouldPlay) },
+            dismissActivity: { [weak self] identifier in self?.developerDismissActivity(identifier) },
+            openSettings: { [weak self] in self?.openDeveloperSystemSettings() },
+            returnToDefault: { [weak self] in self?.developerReturnToDefaultState() }
+        ))
+        developerMode.onPresentationChange = { [weak self] presentation in
+            self?.applyDeveloperPresentation(presentation)
+        }
+        developerMode.onConsoleReveal = { [weak self] in
+            self?.panel.makeKeyAndOrderFront(nil)
+        }
+        notch.onDeveloperModeClick = { [weak self] shiftHeld in
+            self?.developerMode.handleOptionClick(shiftHeld: shiftHeld)
+        }
+        developerHost?.onDeveloperClick = { [weak self] shiftHeld in
+            self?.developerMode.handleOptionClick(shiftHeld: shiftHeld)
+        }
+        installDeveloperSessionObservers()
+        DeveloperEventLog.shared.append("Lifecycle", "App launched; developer session locked")
+
         panel.orderFrontRegardless()
 
         notch.onToggleExpanded = { [weak self] in
@@ -2388,6 +2436,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             // after a temporary clock/battery-only strip.
             self.resizeWindow(animated: true)
             self.notch.needsDisplay = true
+            DeveloperEventLog.shared.append("Interface", self.notch.expanded ? "Notch expanded" : "Notch collapsed")
         }
 
         notch.onFileDropHoverChanged = { [weak self] _ in self?.resizeWindow(animated: true) }
@@ -2460,6 +2509,195 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             self.resizeWindow(animated: true)
             self.startPolling()
         }
+    }
+
+    private func applyDeveloperPresentation(_ presentation: DeveloperModePresentation) {
+        guard let panel, let notch, let developerHost else { return }
+        if presentation == .closed {
+            if panel.contentView !== notch { panel.contentView = notch }
+        } else if panel.contentView !== developerHost {
+            panel.contentView = developerHost
+        }
+        // Give Developer Mode's larger panel a more deliberate transition,
+        // while leaving the timing of all other notch activities untouched.
+        let settings = DeveloperAnimationSettings.shared
+        let transitionDuration = presentation == .closed
+            ? settings.effectiveCollapseDuration * 1.75
+            : settings.effectiveExpansionDuration * 1.75
+        resizeWindow(animated: true, durationOverride: transitionDuration)
+        DeveloperEventLog.shared.append("Console", presentation == .console ? "Developer console opened" : "Developer authentication panel shown")
+    }
+
+    private func installDeveloperSessionObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+        let sessionObserver = center.addObserver(
+            forName: NSWorkspace.sessionDidResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.developerMode.lockDeveloperMode(reason: .screenLocked) }
+        }
+        let sleepObserver = center.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.developerMode.lockDeveloperMode(reason: .systemSleep) }
+        }
+        let wakeObserver = center.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.developerMode.lockDeveloperMode(reason: .sessionExpired) }
+        }
+        let powerOffObserver = center.addObserver(
+            forName: NSWorkspace.willPowerOffNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.developerMode.lockDeveloperMode(reason: .userLoggedOut) }
+        }
+        let activeObserver = center.addObserver(
+            forName: NSWorkspace.sessionDidBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                // Becoming active never restores a previously authenticated session.
+                self.developerMode.lockDeveloperMode(reason: .sessionExpired)
+            }
+        }
+        developerSessionObservers = [sessionObserver, sleepObserver, wakeObserver, powerOffObserver, activeObserver]
+    }
+
+    private func makeDeveloperSnapshot() async -> DeveloperSnapshot {
+        var snapshot = DeveloperSnapshot.environment
+        let presentationIsVisible: Bool
+        switch developerMode.presentation {
+        case .closed: presentationIsVisible = false
+        default: presentationIsVisible = true
+        }
+        var activities: [DeveloperActivity] = []
+        if notch.mediaPlaying {
+            activities.append(DeveloperActivity(
+                id: "youtube", name: "YouTube playback", kind: "Media",
+                state: notch.mediaPaused ? "Paused" : "Playing", startedAt: nil,
+                visibleInNotch: !presentationIsVisible && notch.mediaPlaying,
+                details: "Playback active; media title and URL omitted",
+                canTogglePlayback: currentMediaTabID != nil, canDismiss: false
+            ))
+        }
+        if notch.systemTimerActive {
+            activities.append(DeveloperActivity(
+                id: "timer", name: "System timer", kind: "Timer", state: notch.systemTimerText,
+                startedAt: nil, visibleInNotch: !presentationIsVisible,
+                details: "Timer continues independently of this console",
+                canTogglePlayback: false, canDismiss: false
+            ))
+        }
+        if notch.incomingNotification != nil {
+            activities.append(DeveloperActivity(
+                id: "inbox", name: "Incoming message", kind: "Notification", state: "Queued for notch",
+                startedAt: nil, visibleInNotch: !presentationIsVisible,
+                details: "Message contents omitted", canTogglePlayback: false, canDismiss: true
+            ))
+        }
+        if notch.whatsAppMessageActive || !notch.whatsAppMessages.isEmpty {
+            activities.append(DeveloperActivity(
+                id: "whatsapp", name: "WhatsApp message card", kind: "Notification", state: "Active",
+                startedAt: nil, visibleInNotch: !presentationIsVisible,
+                details: "Sender and message contents omitted", canTogglePlayback: false, canDismiss: false
+            ))
+        }
+        if notch.whatsAppCallActive || notch.whatsAppInCall {
+            activities.append(DeveloperActivity(
+                id: "whatsapp-call", name: "WhatsApp call", kind: "Communication", state: notch.whatsAppInCall ? "In call" : "Incoming",
+                startedAt: nil, visibleInNotch: !presentationIsVisible,
+                details: "Call controls remain active", canTogglePlayback: false, canDismiss: false
+            ))
+        }
+        if notch.fileDropURL != nil || notch.fileDropHovering {
+            activities.append(DeveloperActivity(
+                id: "file-drop", name: "File transfer preview", kind: "File", state: notch.fileDropURL == nil ? "Drop target active" : "Preview ready",
+                startedAt: nil, visibleInNotch: !presentationIsVisible,
+                details: "File name and path omitted", canTogglePlayback: false, canDismiss: false
+            ))
+        }
+        if notch.lowBatteryAlertPercent != nil || notch.noNetworkAlertActive {
+            activities.append(DeveloperActivity(
+                id: "system-alert", name: notch.noNetworkAlertActive ? "Network alert" : "Battery alert", kind: "System alert", state: "Visible briefly",
+                startedAt: nil, visibleInNotch: !presentationIsVisible,
+                details: "Alert timeout continues while the console is open", canTogglePlayback: false, canDismiss: false
+            ))
+        }
+        if notch.chargingIndicatorActive {
+            activities.append(DeveloperActivity(
+                id: "charging", name: "Charging indicator", kind: "Power", state: "Active",
+                startedAt: nil, visibleInNotch: !presentationIsVisible,
+                details: "Automatic timeout continues", canTogglePlayback: false, canDismiss: false
+            ))
+        }
+        if notch.volumeHUD {
+            activities.append(DeveloperActivity(
+                id: "volume", name: "Volume HUD", kind: "System control", state: "Visible",
+                startedAt: nil, visibleInNotch: !presentationIsVisible,
+                details: "Volume level \(Int(notch.volume * 100))%",
+                canTogglePlayback: false, canDismiss: false
+            ))
+        }
+        if notch.appSwitchIcon != nil {
+            activities.append(DeveloperActivity(
+                id: "app-switch", name: "App switch indicator", kind: "Application", state: "Transitioning",
+                startedAt: nil, visibleInNotch: !presentationIsVisible,
+                details: "App icon identity omitted", canTogglePlayback: false, canDismiss: false
+            ))
+        }
+        snapshot = DeveloperSnapshot(
+            version: snapshot.version, build: snapshot.build, macOS: snapshot.macOS,
+            architecture: snapshot.architecture, uptime: snapshot.uptime,
+            memoryBytes: snapshot.memoryBytes, activities: activities,
+            permissions: await DeveloperPermissionReader.read()
+        )
+        var nextPermissions: [String: String] = [:]
+        for permission in snapshot.permissions {
+            nextPermissions[permission.id] = permission.status
+            if let previous = lastDeveloperPermissionStates[permission.id], previous != permission.status {
+                DeveloperEventLog.shared.append("Permission", "\(permission.name) status changed: \(previous) → \(permission.status)")
+            }
+        }
+        lastDeveloperPermissionStates = nextPermissions
+        return snapshot
+    }
+
+    private func developerSetPlayback(shouldPlay: Bool) {
+        guard let tabID = currentMediaTabID else { return }
+        notch.mediaPaused = !shouldPlay
+        mediaActionOverrideUntil = Date().addingTimeInterval(1.8)
+        ChromeYouTube.performVideoAction(shouldPlay ? "play" : "pause", tabID: tabID, videoID: currentMediaVideoID)
+        DeveloperEventLog.shared.append("Activity", shouldPlay ? "Media playback resumed by developer" : "Media playback paused by developer")
+    }
+
+    private func developerDismissActivity(_ identifier: String) {
+        guard identifier == "inbox", let message = notch.incomingNotification else { return }
+        incomingNotificationTimer?.invalidate()
+        incomingNotificationTimer = nil
+        notch.incomingNotification = nil
+        pendingNotificationFingerprints.remove(message.fingerprint)
+        resizeWindow(animated: true)
+        showNextIncomingNotificationIfNeeded()
+        DeveloperEventLog.shared.append("Activity", "Current incoming message card dismissed by developer")
+    }
+
+    private func openDeveloperSystemSettings() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
+    }
+
+    private func developerReturnToDefaultState() {
+        notch.expanded = false
+        developerMode.closeConsole()
+        resizeWindow(animated: true)
     }
 
     // MARK: Call Timer
@@ -2866,6 +3104,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         _ = InboxStore.shared.add(message)
         incomingNotificationQueue.append(message)
         print("[Inbox] queued \(message.service) notch card")
+        DeveloperEventLog.shared.append("Activity", "\(message.service) notification created")
         showNextIncomingNotificationIfNeeded()
     }
 
@@ -2992,6 +3231,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func installBluetoothPowerObservers() {
+        guard InboxNotifications.hasApplicationBundle else { return }
         let center = NotificationCenter.default
         let states: [(Notification.Name, Bool)] = [
             (.IOBluetoothHostControllerPoweredOn, true),
@@ -3010,6 +3250,10 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private func startFocusStatusMonitoring() {
         guard !focusStatusMonitoringStarted else { return }
         focusStatusMonitoringStarted = true
+        guard InboxNotifications.hasApplicationBundle else {
+            NSLog("[FocusStatus] skipped: Focus access requires the packaged grassIsland.app bundle")
+            return
+        }
         let center = INFocusStatusCenter.default
         center.requestAuthorization { [weak self] status in
             guard status == .authorized else {
@@ -3374,13 +3618,19 @@ private func animateVolumeHUD(to target: CGFloat) {
 
     // MARK: Window Geometry
 
-    private func resizeWindow(animated: Bool = true) {
+    private func resizeWindow(animated: Bool = true, durationOverride: TimeInterval? = nil) {
         guard let screen = NSScreen.notchScreen else { return }
 
         let targetWidth: CGFloat
         let targetHeight: CGFloat
 
-        if notch.fileDropURL != nil || notch.fileDropHovering {
+        if developerMode.presentation == .console {
+            targetWidth = 720
+            targetHeight = 660
+        } else if developerMode.presentation == .authenticating || developerMode.presentation.isDeveloperMessage {
+            targetWidth = 410
+            targetHeight = 168
+        } else if notch.fileDropURL != nil || notch.fileDropHovering {
             targetWidth = NotchView.fileDropPanelSize.width
             targetHeight = NotchView.fileDropPanelSize.height
         } else if notch.noNetworkAlertActive {
@@ -3454,28 +3704,105 @@ private func animateVolumeHUD(to target: CGFloat) {
             return
         }
 
+        resizeAnimationGeneration += 1
+        let animationGeneration = resizeAnimationGeneration
+        let startingFrame = panel.frame
         currentWidth = targetWidth
         currentHeight = windowHeight
 
         if animated {
             let isOpening = windowHeight > panel.frame.height || targetWidth > panel.frame.width
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = notch.appSwitchIcon != nil
-                    ? appSwitchExpansionDuration
-                    : (isOpening ? 0.29 : 0.26)
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                context.allowsImplicitAnimation = true
-                panel.animator().setFrame(frame, display: true)
+            let settings = DeveloperAnimationSettings.shared
+            let duration = isOpening
+                ? settings.effectiveExpansionDuration
+                : settings.effectiveCollapseDuration
+            if settings.reduceMotion || duration == 0 {
+                panel.setFrame(frame, display: true)
+                notch.needsDisplay = true
+                return
             }
+            let animationDuration = durationOverride ?? (notch.appSwitchIcon != nil
+                ? appSwitchExpansionDuration
+                : duration)
+            animateNotchFrame(
+                frame,
+                from: startingFrame,
+                duration: animationDuration,
+                settings: settings,
+                generation: animationGeneration
+            )
         } else {
             panel.setFrame(frame, display: true)
             notch.needsDisplay = true
         }
     }
 
+    /// Apply a subtle, adjustable overshoot to the shared notch window resize.
+    /// Keeping it here makes the motion consistent across all live activities.
+    private func animateNotchFrame(
+        _ finalFrame: NSRect,
+        from startingFrame: NSRect,
+        duration: TimeInterval,
+        settings: DeveloperAnimationSettings,
+        generation: Int
+    ) {
+        guard duration > 0, settings.springResponsiveness > 0.01 else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = duration
+                context.timingFunction = settings.timingFunction
+                context.allowsImplicitAnimation = true
+                panel.animator().setFrame(finalFrame, display: true)
+            }
+            return
+        }
+
+        let widthDelta = finalFrame.width - startingFrame.width
+        let heightDelta = finalFrame.height - startingFrame.height
+        let bounce = settings.springResponsiveness
+        let widthOvershoot = widthDelta == 0 ? 0 : min(finalFrame.width * 0.018 * bounce, abs(widthDelta) * 0.22)
+        let heightOvershoot = heightDelta == 0 ? 0 : min(finalFrame.height * 0.022 * bounce, abs(heightDelta) * 0.22)
+        guard widthOvershoot > 0.15 || heightOvershoot > 0.15 else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = duration
+                context.timingFunction = settings.timingFunction
+                context.allowsImplicitAnimation = true
+                panel.animator().setFrame(finalFrame, display: true)
+            }
+            return
+        }
+
+        let overshootWidth = max(1, finalFrame.width + (widthDelta > 0 ? widthOvershoot : -widthOvershoot))
+        let overshootHeight = max(1, finalFrame.height + (heightDelta > 0 ? heightOvershoot : -heightOvershoot))
+        let screenTop = finalFrame.maxY
+        let overshootFrame = NSRect(
+            x: finalFrame.midX - overshootWidth / 2,
+            y: screenTop - overshootHeight,
+            width: overshootWidth,
+            height: overshootHeight
+        )
+
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = duration * 0.78
+            context.timingFunction = settings.timingFunction
+            context.allowsImplicitAnimation = true
+            panel.animator().setFrame(overshootFrame, display: true)
+        }, completionHandler: { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.resizeAnimationGeneration == generation else { return }
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = duration * 0.22
+                    context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    context.allowsImplicitAnimation = true
+                    self.panel.animator().setFrame(finalFrame, display: true)
+                }
+            }
+        })
+    }
+
     // MARK: Cleanup
 
     func applicationWillTerminate(_ notification: Notification) {
+        developerMode.lockDeveloperMode(reason: .applicationTerminated)
         timers.forEach { $0.invalidate() }
         timers.removeAll()
 
@@ -3497,6 +3824,10 @@ private func animateVolumeHUD(to target: CGFloat) {
                 appActivationObserver
             )
         }
+        developerSessionObservers.forEach {
+            NSWorkspace.shared.notificationCenter.removeObserver($0)
+        }
+        developerSessionObservers.removeAll()
     }
 }
 

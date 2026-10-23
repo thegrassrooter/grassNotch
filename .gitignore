@@ -1,0 +1,35 @@
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode user settings
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+DerivedData/
+
+# Build products
+build/
+*.app
+*.dSYM
+*.dSYM.zip
+*.ipa
+*.xcarchive
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# Temporary files
+*.swp
+*.tmp
+*.log
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
