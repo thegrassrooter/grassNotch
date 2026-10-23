@@ -2513,6 +2513,27 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyDeveloperPresentation(_ presentation: DeveloperModePresentation) {
         guard let panel, let notch, let developerHost else { return }
+        let developerWindowIsInteractive = presentation == .authenticating || presentation == .console
+        if developerWindowIsInteractive {
+            // The notch normally uses a non-activating status-bar panel. That
+            // keeps ordinary clicks from stealing focus, but it can cover the
+            // LocalAuthentication dialog. Make the app/window active and put
+            // it below system authentication UI for the developer session.
+            var styleMask = panel.styleMask
+            styleMask.remove(.nonactivatingPanel)
+            panel.styleMask = styleMask
+            panel.level = .normal
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        } else {
+            // Restore the notch's passive, always-on-top behavior after a
+            // failure/cancel or when the console closes.
+            if panel.isKeyWindow { panel.resignKey() }
+            var styleMask = panel.styleMask
+            styleMask.insert(.nonactivatingPanel)
+            panel.styleMask = styleMask
+            panel.level = .statusBar
+        }
         if presentation == .closed {
             if panel.contentView !== notch { panel.contentView = notch }
         } else if panel.contentView !== developerHost {

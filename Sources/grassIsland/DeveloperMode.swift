@@ -131,6 +131,7 @@ final class DeveloperModeManager: ObservableObject {
     private var context: LAContext?
     private var requestID = UUID()
     private var failureTask: Task<Void, Never>?
+    private var authenticationTimeoutTask: Task<Void, Never>?
 
     func handleOptionClick(shiftHeld: Bool) {
         if presentation == .authenticating { return }
@@ -161,6 +162,8 @@ final class DeveloperModeManager: ObservableObject {
         requestID = UUID()
         failureTask?.cancel()
         failureTask = nil
+        authenticationTimeoutTask?.cancel()
+        authenticationTimeoutTask = nil
         context?.invalidate()
         context = nil
         isAuthenticated = false
@@ -176,7 +179,8 @@ final class DeveloperModeManager: ObservableObject {
 
         let context = LAContext()
         context.localizedCancelTitle = "Cancel"
-        context.localizedFallbackTitle = ""
+        context.localizedFallbackTitle = nil
+        context.interactionNotAllowed = false
         var evaluationError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &evaluationError) else {
             showFailure(message(for: evaluationError))
@@ -188,22 +192,41 @@ final class DeveloperModeManager: ObservableObject {
         let request = UUID()
         requestID = request
         setPresentation(.authenticating)
-        context.evaluatePolicy(
-            .deviceOwnerAuthenticationWithBiometrics,
-            localizedReason: "Authenticate with Touch ID to open the grassNotch Developer Console."
-        ) { [weak self] success, error in
-            Task { @MainActor [weak self] in
-                guard let self, self.requestID == request,
-                      self.presentation == .authenticating else { return }
-                self.context = nil
-                if success {
-                    self.isAuthenticated = true
-                    DeveloperEventLog.shared.append("Security", "Biometric authentication succeeded")
-                    self.setPresentation(.console)
-                } else {
-                    let text = Self.message(for: error)
-                    DeveloperEventLog.shared.append("Security", "Biometric authentication failed or was cancelled")
-                    self.showFailure(text)
+        // Let AppKit finish activating the accessory app and resizing the notch
+        // before LocalAuthentication asks macOS to present its system-owned UI.
+        authenticationTimeoutTask = Task { @MainActor [weak self, weak context] in
+            try? await Task.sleep(nanoseconds: 45_000_000_000)
+            guard let self, self.requestID == request,
+                  self.presentation == .authenticating else { return }
+            context?.invalidate()
+            self.context = nil
+            self.authenticationTimeoutTask = nil
+            DeveloperEventLog.shared.append("Security", "Biometric authentication timed out")
+            self.showFailure("Authentication timed out. Try again.")
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, self.requestID == request,
+                  self.presentation == .authenticating else { return }
+            context.evaluatePolicy(
+                .deviceOwnerAuthenticationWithBiometrics,
+                localizedReason: "Authenticate to open the Developer Console."
+            ) { [weak self] success, error in
+                Task { @MainActor [weak self] in
+                    guard let self, self.requestID == request,
+                          self.presentation == .authenticating else { return }
+                    self.authenticationTimeoutTask?.cancel()
+                    self.authenticationTimeoutTask = nil
+                    self.context = nil
+                    if success {
+                        self.isAuthenticated = true
+                        DeveloperEventLog.shared.append("Security", "Biometric authentication succeeded")
+                        self.setPresentation(.console)
+                    } else {
+                        let text = Self.message(for: error)
+                        DeveloperEventLog.shared.append("Security", "Biometric authentication failed or was cancelled")
+                        self.showFailure(text)
+                    }
                 }
             }
         }
@@ -237,6 +260,9 @@ final class DeveloperModeManager: ObservableObject {
         case .biometryNotEnrolled: return "Set up Touch ID in System Settings to continue."
         case .biometryLockout: return "Touch ID is locked. Unlock your Mac, then try again."
         case .passcodeNotSet: return "Set a Mac login passcode before using Touch ID."
+        case .authenticationFailed: return "Not recognised"
+        case .userCancel, .userFallback, .systemCancel, .appCancel: return "Authentication cancelled. Try again when ready."
+        case .notInteractive: return "macOS could not show the authentication prompt. Try again."
         default: return "Authentication could not be completed. Try again."
         }
     }

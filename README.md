@@ -2,28 +2,27 @@
 
 grassNotch is a native macOS menu-bar/notch app built with Swift and SwiftUI.
 
-## Run from source
+## Build and launch the app
 
 Requirements: macOS 15 or later and Swift 6.4 or later from Xcode or Apple's Command Line Tools.
 
-1. Unzip the project.
-2. Open Terminal and change into the unzipped project folder.
-3. Run:
+1. Unzip the project and open Terminal in the project folder.
+2. Build the packaged macOS app:
 
    ```sh
-   swift run
+   ./scripts/package-app.sh
    ```
 
-The first run compiles the app. Keep Terminal open while using it; press Control-C in that Terminal to stop it. macOS may ask for Automation or Accessibility access for features that inspect or control other apps.
+3. Launch the app:
 
-When started with `swift run`, grassNotch runs as a SwiftPM executable. macOS requires a registered `.app` bundle for Notification Center delivery and usage-description-backed Focus/Bluetooth access. Gmail and WhatsApp items can still appear in the notch, but native Notification Center alerts and Focus/Bluetooth indicators require the packaged app.
+   ```sh
+   open .build/out/Products/Debug/grassIsland.app
+   ```
 
-## Build the packaged app
+The packaged app includes the bundle metadata required for Touch ID, Notification Center, Focus, and Bluetooth integration. Touch ID requires a Mac with Touch ID enabled and enrolled. Developer Mode always starts locked and uses macOS LocalAuthentication; it does not store authentication between launches.
 
-To create a local `.app` bundle with the app icon and native Notification Center support, run:
+macOS may ask for Automation or Accessibility access for features that inspect or control other apps. Running `swift run` launches an unbundled SwiftPM executable and does not provide the app-bundle integrations above.
 
-```sh
-./scripts/package-app.sh
-```
+## Distribution notes
 
-The app is written to `.build/out/Products/Debug/grassIsland.app`. This project ZIP is an unsigned source distribution; sharing it does not include Developer ID signing or Apple notarization. Recipients can build and run the source with `swift run` as described above.
+The build script creates `.build/out/Products/Debug/grassIsland.app` and ad-hoc signs it locally. The ZIP is a source distribution, not a Developer ID signed or notarized app. On another Mac, build it there with the steps above; macOS may require the recipient to confirm opening an app downloaded from the internet.

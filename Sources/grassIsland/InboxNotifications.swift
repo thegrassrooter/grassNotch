@@ -71,9 +71,11 @@ enum InboxNotifications {
         if let bundled = Bundle.main.url(forResource: name, withExtension: "png") {
             return bundled
         }
+#if !GRASS_ISLAND_REGRESSION
         if let packaged = Bundle.module.url(forResource: name, withExtension: "png", subdirectory: "Assets") {
             return packaged
         }
+#endif
         let developmentURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("Resources", isDirectory: true)
             .appendingPathComponent("\(name).png")
@@ -85,9 +87,11 @@ enum InboxNotifications {
         if let bundled = Bundle.main.url(forResource: name, withExtension: "jpg") {
             return bundled
         }
+#if !GRASS_ISLAND_REGRESSION
         if let packaged = Bundle.module.url(forResource: name, withExtension: "jpg", subdirectory: "Assets") {
             return packaged
         }
+#endif
         let developmentURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("Resources", isDirectory: true)
             .appendingPathComponent("\(name).jpg")
