@@ -460,6 +460,10 @@ struct DeveloperOverlayRoot: View {
             ),
             style: .continuous
         ))
+        // NSHostingView inherits the MacBook display's top safe area. This
+        // panel is already positioned at the physical screen edge, so let the
+        // developer surface fill that area instead of starting below it.
+        .ignoresSafeArea(edges: .top)
         .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .spring(response: 0.52, dampingFraction: 0.9), value: manager.presentation)
     }
 
