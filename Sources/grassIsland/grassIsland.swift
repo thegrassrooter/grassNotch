@@ -302,6 +302,40 @@ struct MediaInfo: Sendable {
 }
 
 enum ChromeYouTube {
+    @MainActor
+    static func fetchPlaybackState(
+        tabID: Int,
+        completion: @MainActor @Sendable @escaping (Bool?) -> Void
+    ) {
+        guard tabID > 0 else { completion(nil); return }
+        let script = #"""
+        tell application "Google Chrome"
+            if not running or (count of windows) is 0 then return "NO_STATE"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if (id of t as integer) is TAB_ID then
+                        set stateResult to execute t javascript "(() => { const shortPage = location.pathname.startsWith('/shorts/'); const v = (shortPage ? (document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video')) : null) || document.querySelector('video.html5-main-video') || document.querySelector('video'); return v && !v.paused && !v.ended ? 'PLAYING' : 'PAUSED'; })()"
+                        return stateResult
+                    end if
+                end repeat
+            end repeat
+            return "NO_STATE"
+        end tell
+        """#.replacingOccurrences(of: "TAB_ID", with: String(tabID))
+
+        SystemVolume.runAppleScriptAsync(script, timeoutInterval: 1.5) { output in
+            guard let state = output?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                completion(nil)
+                return
+            }
+            switch state {
+            case "PLAYING": completion(true)
+            case "PAUSED": completion(false)
+            default: completion(nil)
+            }
+        }
+    }
+
     static func fetch(
         preferredTabID: Int?,
         completion: @MainActor @Sendable @escaping (MediaInfo?) -> Void
@@ -2355,6 +2389,9 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var currentMediaTabID: Int?
     private var currentShortSession = false
     private var mediaCheckInProgress = false
+    private var mediaPlaybackCheckInProgress = false
+    private var mediaPlaybackRevision = 0
+    private var lastFullMediaPollAt: CFTimeInterval = 0
     private var loadedThumbnailURL = ""
     private var mediaActionOverrideUntil = Date.distantPast
     private var mediaTimeOverrideUntil = Date.distantPast
@@ -2514,7 +2551,10 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         // Observe YouTube playback during the startup splash so the audio
         // indicator is not delayed until the rest of app polling starts.
         let youtubeTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.pollYouTube() }
+            Task { @MainActor in
+                self?.pollYouTubePlaybackState()
+                self?.pollYouTube()
+            }
         }
         youtubePollingTimer = youtubeTimer
         RunLoop.main.add(youtubeTimer, forMode: .common)
@@ -3472,7 +3512,12 @@ private func animateVolumeHUD(to target: CGFloat) {
 
     private func pollYouTube() {
         guard !mediaCheckInProgress else { return }
+        let now = CACurrentMediaTime()
+        let minimumInterval: CFTimeInterval = currentMediaTabID == nil ? 0.5 : 1.2
+        guard now - lastFullMediaPollAt >= minimumInterval else { return }
+        lastFullMediaPollAt = now
         mediaCheckInProgress = true
+        let playbackRevisionAtStart = mediaPlaybackRevision
         ChromeYouTube.fetch(preferredTabID: currentMediaTabID) { [weak self] media in
             guard let self = self else { return }
             self.mediaCheckInProgress = false
@@ -3530,7 +3575,7 @@ private func animateVolumeHUD(to target: CGFloat) {
                 self.notch.mediaTitle = media.title
             }
 
-            self.updateMediaDetails(media)
+            self.updateMediaDetails(media, updatePlaybackState: self.mediaPlaybackRevision == playbackRevisionAtStart)
             self.notch.mediaIsShort = media.isShort
             if self.notch.startupSplash && !media.isPaused {
                 self.notch.startupSplash = false
@@ -3544,8 +3589,25 @@ private func animateVolumeHUD(to target: CGFloat) {
         }
     }
 
-    private func updateMediaDetails(_ media: MediaInfo) {
-        if Date() >= mediaActionOverrideUntil {
+    private func pollYouTubePlaybackState() {
+        guard let tabID = currentMediaTabID, !mediaPlaybackCheckInProgress else { return }
+        mediaPlaybackCheckInProgress = true
+        ChromeYouTube.fetchPlaybackState(tabID: tabID) { [weak self] isPlaying in
+            guard let self else { return }
+            self.mediaPlaybackCheckInProgress = false
+            guard let isPlaying else { return }
+            self.mediaPlaybackRevision &+= 1
+            if Date() >= self.mediaActionOverrideUntil {
+                self.notch.mediaPaused = !isPlaying
+            }
+            if isPlaying && self.notch.startupSplash {
+                self.notch.startupSplash = false
+            }
+        }
+    }
+
+    private func updateMediaDetails(_ media: MediaInfo, updatePlaybackState: Bool = true) {
+        if updatePlaybackState && Date() >= mediaActionOverrideUntil {
             notch.mediaPaused = media.isPaused
         }
         if Date() >= mediaTimeOverrideUntil {
