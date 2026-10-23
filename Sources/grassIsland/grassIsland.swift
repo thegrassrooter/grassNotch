@@ -2534,13 +2534,13 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         let developerWindowIsInteractive = presentation == .authenticating || presentation == .console
         if developerWindowIsInteractive {
             // The notch normally uses a non-activating status-bar panel. That
-            // keeps ordinary clicks from stealing focus, but it can cover the
-            // LocalAuthentication dialog. Make the app/window active and put
-            // it below system authentication UI for the developer session.
+            // keeps ordinary clicks from stealing focus. Keep this panel at
+            // the same edge-attached level while it becomes interactive; a
+            // normal-level window is placed below the menu bar on macOS.
             var styleMask = panel.styleMask
             styleMask.remove(.nonactivatingPanel)
             panel.styleMask = styleMask
-            panel.level = .normal
+            panel.level = .statusBar
             NSApp.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
         } else {
