@@ -1427,6 +1427,15 @@ final class NotchView: NSView, NSDraggingSource {
             y: max(8, visibleBodyHeight / 2 - measured.height / 2)
         )
         logo.draw(at: origin)
+
+        let subtitle = NSAttributedString(string: "NotchOS 2", attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: NSColor(white: 0.92, alpha: 1)
+        ])
+        subtitle.draw(at: NSPoint(
+            x: bounds.midX - subtitle.size().width / 2,
+            y: max(1, origin.y - subtitle.size().height - 1)
+        ))
     }
 
     // MARK: Connected WhatsApp Notification
@@ -2308,6 +2317,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var lastBluetoothPoweredOn: Bool?
     private var lastBluetoothNotificationAt: CFTimeInterval = 0
     private var focusStatusTimer: Timer?
+    private var youtubePollingTimer: Timer?
     private var lastFocusState: Bool?
     private var focusStatusMonitoringStarted = false
     private var systemAlertQueue: [SystemAlert] = []
@@ -2413,6 +2423,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             openSettings: { [weak self] in self?.openDeveloperSystemSettings() },
             returnToDefault: { [weak self] in self?.developerReturnToDefaultState() }
         ))
+        developerHost?.safeAreaRegions = []
         developerMode.onPresentationChange = { [weak self] presentation in
             self?.applyDeveloperPresentation(presentation)
         }
@@ -2500,6 +2511,13 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
         installAppActivationObserver()
         pollClockAndBattery()
+        // Observe YouTube playback during the startup splash so the audio
+        // indicator is not delayed until the rest of app polling starts.
+        let youtubeTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pollYouTube() }
+        }
+        youtubePollingTimer = youtubeTimer
+        RunLoop.main.add(youtubeTimer, forMode: .common)
         notch.expanded = true
         resizeWindow(animated: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
@@ -2912,16 +2930,6 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Faster checks help the indicator appear soon after playback starts.
-        let mediaTimer = Timer.scheduledTimer(
-            withTimeInterval: 0.28,
-            repeats: true
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.pollYouTube()
-            }
-        }
-
         let systemTimer = Timer.scheduledTimer(
             withTimeInterval: 0.5,
             repeats: true
@@ -2983,7 +2991,6 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
         timers = [
             volumeTimer,
-            mediaTimer,
             systemTimer,
             clockTimer,
             bluetoothTimer,
@@ -3525,6 +3532,9 @@ private func animateVolumeHUD(to target: CGFloat) {
 
             self.updateMediaDetails(media)
             self.notch.mediaIsShort = media.isShort
+            if self.notch.startupSplash && !media.isPaused {
+                self.notch.startupSplash = false
+            }
             if !self.notch.mediaPlaying {
                 self.notch.mediaPlaying = true
                 self.resizeWindow()
@@ -3835,6 +3845,8 @@ private func animateVolumeHUD(to target: CGFloat) {
         chargingDismissTimer?.invalidate()
         systemAlertTimer?.invalidate()
         focusStatusTimer?.invalidate()
+        youtubePollingTimer?.invalidate()
+        youtubePollingTimer = nil
         networkMonitor.cancel()
 
         systemStateObservers.forEach { NotificationCenter.default.removeObserver($0) }
