@@ -311,11 +311,15 @@ enum ChromeYouTube {
         let script = #"""
         tell application "Google Chrome"
             if not running or (count of windows) is 0 then return "NO_STATE"
+            set stateJS to "(() => { const shortPage = location.pathname.startsWith('/shorts/'); const v = (shortPage ? (document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video')) : null) || document.querySelector('video.html5-main-video') || document.querySelector('video'); return v && !v.paused && !v.ended ? 'PLAYING' : 'PAUSED'; })()"
+            set frontTab to active tab of front window
+            if (id of frontTab as integer) is TAB_ID then
+                return execute frontTab javascript stateJS
+            end if
             repeat with w in windows
                 repeat with t in tabs of w
                     if (id of t as integer) is TAB_ID then
-                        set stateResult to execute t javascript "(() => { const shortPage = location.pathname.startsWith('/shorts/'); const v = (shortPage ? (document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video')) : null) || document.querySelector('video.html5-main-video') || document.querySelector('video'); return v && !v.paused && !v.ended ? 'PLAYING' : 'PAUSED'; })()"
-                        return stateResult
+                        return execute t javascript stateJS
                     end if
                 end repeat
             end repeat
@@ -323,7 +327,7 @@ enum ChromeYouTube {
         end tell
         """#.replacingOccurrences(of: "TAB_ID", with: String(tabID))
 
-        SystemVolume.runAppleScriptAsync(script, timeoutInterval: 1.5) { output in
+        SystemVolume.runAppleScriptAsync(script, timeoutInterval: 0.75) { output in
             guard let state = output?.trimmingCharacters(in: .whitespacesAndNewlines) else {
                 completion(nil)
                 return
@@ -2550,10 +2554,14 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         pollClockAndBattery()
         // Observe YouTube playback during the startup splash so the audio
         // indicator is not delayed until the rest of app polling starts.
-        let youtubeTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+        let youtubeTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.pollYouTubePlaybackState()
-                self?.pollYouTube()
+                guard let self else { return }
+                self.pollYouTubePlaybackState()
+                self.pollYouTube()
+                // Keep waveform redraws alive from app launch, including while
+                // the startup splash is visible and before normal polling starts.
+                if self.notch.mediaPlaying { self.notch.needsDisplay = true }
             }
         }
         youtubePollingTimer = youtubeTimer
@@ -3016,27 +3024,13 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        let animationTimer = Timer.scheduledTimer(
-            withTimeInterval: 0.06,
-            repeats: true
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.notch.mediaPlaying else {
-                    return
-                }
-
-                self.notch.needsDisplay = true
-            }
-        }
-
         timers = [
             volumeTimer,
             systemTimer,
             clockTimer,
             bluetoothTimer,
             whatsappTimer,
-            gmailTimer,
-            animationTimer
+            gmailTimer
         ]
 
         timers.forEach {
