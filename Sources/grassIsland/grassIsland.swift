@@ -935,6 +935,8 @@ enum WhatsAppMonitor {
 
 @MainActor
 final class NotchView: NSView {
+    static let clearAllFadeDuration: TimeInterval = 0.16
+
     // Use an explicit opaque sRGB zero so the notch surface never inherits a
     // dynamic system color or an alpha-tinted black from the current appearance.
     private static let pitchBlack = NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
@@ -2263,6 +2265,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var developerSessionObservers: [NSObjectProtocol] = []
     private var lastDeveloperPermissionStates: [String: String] = [:]
     private var incomingNotificationQueue: [InboxMessage] = []
+    private var isClearingIncomingMessages = false
     private var pendingNotificationFingerprints = Set<String>()
     private var deferredInboxMessages: [String: InboxMessage] = [:]
     private var inboxSessionInactive = false
@@ -3316,6 +3319,9 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func clearIncomingMessagesToNotificationCenter() {
+        guard !isClearingIncomingMessages else { return }
+        isClearingIncomingMessages = true
+        let hasVisibleNotification = notch.incomingNotification != nil
         let pending = collectPendingInboxMessages()
         incomingNotificationTimer?.invalidate()
         incomingNotificationTimer = nil
@@ -3327,8 +3333,20 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         notch.incomingNotification = nil
         notch.incomingNotificationAlpha = 1
         deliverInboxBundle(pending)
-        notch.needsDisplay = true
-        resizeWindow(animated: false)
+        guard hasVisibleNotification else {
+            isClearingIncomingMessages = false
+            notch.needsDisplay = true
+            resizeWindow(animated: true)
+            return
+        }
+        animateIncomingNotificationAlpha(to: 0, duration: NotchView.clearAllFadeDuration) { [weak self] in
+            guard let self else { return }
+            self.notch.incomingNotification = nil
+            self.notch.incomingNotificationAlpha = 1
+            self.notch.needsDisplay = true
+            self.isClearingIncomingMessages = false
+            self.resizeWindow(animated: true)
+        }
     }
 
     private func animateIncomingNotificationAlpha(

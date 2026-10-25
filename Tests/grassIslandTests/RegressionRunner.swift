@@ -284,6 +284,11 @@ struct GrassIslandRegressionRunner {
                 && abs((origin.y + textSize.height / 2) - button.midY) < 0.001
         }
 
+        run("clear-all card fades briefly before the notch collapse animation", failures: &failures) {
+            NotchView.clearAllFadeDuration >= 0.12
+                && NotchView.clearAllFadeDuration <= 0.20
+        }
+
         run("app bundle provides a real icon for Notification Center", failures: &failures) {
             let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             let plistURL = root.appendingPathComponent("Resources/Info.plist")
