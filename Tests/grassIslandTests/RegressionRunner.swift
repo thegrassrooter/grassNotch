@@ -276,8 +276,19 @@ struct GrassIslandRegressionRunner {
         run("provided camera and microphone marks are packaged as image assets", failures: &failures) {
             let assets = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appendingPathComponent("Sources/grassIsland/Assets", isDirectory: true)
-            return NSImage(contentsOf: assets.appendingPathComponent("camera-activity.png")) != nil
-                && NSImage(contentsOf: assets.appendingPathComponent("microphone-activity.png")) != nil
+            let cameraURL = assets.appendingPathComponent("camera-activity.png")
+            let microphoneURL = assets.appendingPathComponent("microphone-activity.png")
+            guard let camera = NSBitmapImageRep(data: try! Data(contentsOf: cameraURL)),
+                  let microphone = NSBitmapImageRep(data: try! Data(contentsOf: microphoneURL)) else { return false }
+            func hasVisiblePixels(_ image: NSBitmapImageRep) -> Bool {
+                for y in 0..<image.pixelsHigh {
+                    for x in 0..<image.pixelsWide {
+                        if (image.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 { return true }
+                    }
+                }
+                return false
+            }
+            return hasVisiblePixels(camera) && hasVisiblePixels(microphone)
         }
 
         run("notch input surface is limited to its visible bounds", failures: &failures) {
