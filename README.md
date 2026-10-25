@@ -10,8 +10,8 @@ Line Tools SDK; mixing a separately installed Swift 6.4.1 toolchain with a
 different SDK can fail while scanning system modules such as CoreMIDI, XPC,
 and IOKit. The app reports version 2.5 in its packaged bundle and startup view.
 The authenticated Developer Console includes a persistent switch for hiding
-or showing the compact YouTube audio animation without disabling YouTube status
-or controls.
+or showing the orange moving bars in the compact YouTube status without
+disabling playback, the YouTube logo, or its controls.
 
 The previous release added live camera and microphone activity indicators,
 lower-overhead mirrored displays, and corrected YouTube skip arrows.
