@@ -2,26 +2,37 @@
 
 grassNotch is a native macOS menu-bar/notch app built with Swift and SwiftUI.
 
-## NotchOS 2.4
+## NotchOS 2.5
 
-This release adds live camera and microphone activity indicators using the
-provided camera and microphone icons. The notch widens sideways when idle, adds
-the indicators beside compact YouTube status, and keeps the YouTube controls at
-their existing size while placing indicators in the header. Mirrored displays
-avoid redundant per-draw state copies, and pointer pass-through checks run
-separately from visual synchronization to reduce external-display overhead.
-YouTube skip arrows now match their back and forward actions.
+This release improves source builds on Macs with multiple installed Swift
+toolchains. Use Apple's toolchain that matches the selected Xcode or Command
+Line Tools SDK; mixing a separately installed Swift 6.4.1 toolchain with a
+different SDK can fail while scanning system modules such as CoreMIDI, XPC,
+and IOKit. The app reports version 2.5 in its packaged bundle and startup view.
+
+The previous release added live camera and microphone activity indicators,
+lower-overhead mirrored displays, and corrected YouTube skip arrows.
 
 ## Build and launch the app
 
-Requirements: macOS 15 or later and Swift 6.4 or later from Xcode or Apple's Command Line Tools.
+Requirements: macOS 15 or later and Swift 6.4 or later from the same Xcode or
+Command Line Tools installation that provides the macOS SDK. Do not mix an
+independently installed Swift toolchain with a different Apple SDK.
 
 1. Unzip the project and open Terminal in the project folder.
-2. Build the packaged macOS app:
+2. Build the packaged macOS app with the Xcode-selected Swift toolchain:
 
    ```sh
    ./scripts/package-app.sh
    ```
+
+   To run the SwiftPM executable directly, use `./scripts/swift.sh run`. This
+   selects Apple's Xcode-default toolchain explicitly, avoiding a separately
+   selected toolchain that may not match the active SDK. If you run `swift run`
+   yourself, confirm `swift --version` and `xcode-select -p` refer to a matching
+   Apple toolchain and SDK. Xcode 26 builds can also work around explicit-module
+   scanner errors by setting `SWIFT_ENABLE_EXPLICIT_MODULES=NO` for the affected
+   target, as documented in Apple's Xcode release notes.
 
 3. Launch the app:
 

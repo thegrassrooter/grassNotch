@@ -5,7 +5,7 @@ project_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$project_root"
 
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/private/tmp/grassIsland-module-cache}"
-swift build
+"$project_root/scripts/swift.sh" build
 
 app_bundle="$project_root/.build/out/Products/Debug/grassIsland.app"
 mkdir -p "$app_bundle/Contents/MacOS" "$app_bundle/Contents/Resources"

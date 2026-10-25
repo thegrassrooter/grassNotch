@@ -1643,7 +1643,7 @@ final class NotchView: NSView {
         )
         logo.draw(at: origin)
 
-        let subtitle = NSAttributedString(string: "NotchOS 2.4", attributes: [
+        let subtitle = NSAttributedString(string: "NotchOS 2.5", attributes: [
             .font: NSFont.systemFont(ofSize: 10, weight: .medium),
             .foregroundColor: NSColor(white: 0.92, alpha: 1)
         ])
