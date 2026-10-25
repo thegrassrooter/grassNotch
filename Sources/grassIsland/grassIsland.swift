@@ -6,7 +6,6 @@ import QuartzCore
 import Foundation
 import Intents
 import Network
-import QuickLookThumbnailing
 import IOBluetooth
 import SwiftUI
 
@@ -935,7 +934,7 @@ enum WhatsAppMonitor {
 // MARK: - Physical MacBook Notch View
 
 @MainActor
-final class NotchView: NSView, NSDraggingSource {
+final class NotchView: NSView {
     // Use an explicit opaque sRGB zero so the notch surface never inherits a
     // dynamic system color or an alpha-tinted black from the current appearance.
     private static let pitchBlack = NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
@@ -972,9 +971,6 @@ final class NotchView: NSView, NSDraggingSource {
     var currentAppIconTransitionProgress: CGFloat = 1 { didSet { needsDisplay = true } }
     var incomingNotification: InboxMessage? { didSet { needsDisplay = true } }
     var incomingNotificationAlpha: CGFloat = 1 { didSet { needsDisplay = true } }
-    var fileDropURL: URL? { didSet { needsDisplay = true } }
-    var fileDropThumbnail: NSImage? { didSet { needsDisplay = true } }
-    var fileDropHovering = false { didSet { needsDisplay = true } }
     var noNetworkAlertActive = false { didSet { needsDisplay = true } }
     var lowBatteryAlertPercent: Int? { didSet { needsDisplay = true } }
     var bluetoothAlertState: Bool? { didSet { needsDisplay = true } }
@@ -1008,54 +1004,65 @@ final class NotchView: NSView, NSDraggingSource {
     var onToggleWhatsAppMute: (@MainActor () -> Void)?
     var onMediaPlayPause: (@MainActor () -> Void)?
     var onMediaSeek: (@MainActor (Double) -> Void)?
-    var onFileDrop: (@MainActor (URL) -> Void)?
-    var onFileDropHoverChanged: (@MainActor (Bool) -> Void)?
-    var onFileAction: (@MainActor (String, URL) -> Void)?
-    var onFileDragEnded: (@MainActor () -> Void)?
     var onClearIncomingMessages: (@MainActor () -> Void)?
-    private var fileDragCandidate: URL?
-    private var fileDragStartPoint: NSPoint?
-    private var isDraggingFileOut = false
-    private var fileHoverGeneration = 0
+    var onMirrorToggleExpanded: (@MainActor () -> Void)?
+    var isMirror = false
+    weak var mirrorStateSource: NotchView?
+    private var screenSafeAreaTop: CGFloat { window?.screen?.safeAreaInsets.top ?? 0 }
+
+    func copyVisualState(from source: NotchView) {
+        if volume != source.volume { volume = source.volume }
+        if volumeHUD != source.volumeHUD { volumeHUD = source.volumeHUD }
+        if volumeHUDOpacity != source.volumeHUDOpacity { volumeHUDOpacity = source.volumeHUDOpacity }
+        if mediaPlaying != source.mediaPlaying { mediaPlaying = source.mediaPlaying }
+        if mediaTitle != source.mediaTitle { mediaTitle = source.mediaTitle }
+        if mediaIsShort != source.mediaIsShort { mediaIsShort = source.mediaIsShort }
+        if mediaPaused != source.mediaPaused { mediaPaused = source.mediaPaused }
+        if mediaCurrentTime != source.mediaCurrentTime { mediaCurrentTime = source.mediaCurrentTime }
+        if mediaDuration != source.mediaDuration { mediaDuration = source.mediaDuration }
+        if mediaThumbnail !== source.mediaThumbnail { mediaThumbnail = source.mediaThumbnail }
+        if expanded != source.expanded { expanded = source.expanded }
+        if startupSplash != source.startupSplash { startupSplash = source.startupSplash }
+        if appSwitchIcon !== source.appSwitchIcon { appSwitchIcon = source.appSwitchIcon }
+        if appSwitchOpacity != source.appSwitchOpacity { appSwitchOpacity = source.appSwitchOpacity }
+        if currentAppIcon !== source.currentAppIcon { currentAppIcon = source.currentAppIcon }
+        if previousCurrentAppIcon !== source.previousCurrentAppIcon { previousCurrentAppIcon = source.previousCurrentAppIcon }
+        if currentAppIconTransitionProgress != source.currentAppIconTransitionProgress { currentAppIconTransitionProgress = source.currentAppIconTransitionProgress }
+        if incomingNotification != source.incomingNotification { incomingNotification = source.incomingNotification }
+        if incomingNotificationAlpha != source.incomingNotificationAlpha { incomingNotificationAlpha = source.incomingNotificationAlpha }
+        if noNetworkAlertActive != source.noNetworkAlertActive { noNetworkAlertActive = source.noNetworkAlertActive }
+        if lowBatteryAlertPercent != source.lowBatteryAlertPercent { lowBatteryAlertPercent = source.lowBatteryAlertPercent }
+        if bluetoothAlertState != source.bluetoothAlertState { bluetoothAlertState = source.bluetoothAlertState }
+        if focusAlertState != source.focusAlertState { focusAlertState = source.focusAlertState }
+        if systemTimerActive != source.systemTimerActive { systemTimerActive = source.systemTimerActive }
+        if systemTimerText != source.systemTimerText { systemTimerText = source.systemTimerText }
+        if chargingIndicatorActive != source.chargingIndicatorActive { chargingIndicatorActive = source.chargingIndicatorActive }
+        if currentTimeText != source.currentTimeText { currentTimeText = source.currentTimeText }
+        if batteryPercent != source.batteryPercent { batteryPercent = source.batteryPercent }
+        if batteryIsCharging != source.batteryIsCharging { batteryIsCharging = source.batteryIsCharging }
+        if whatsAppCallActive != source.whatsAppCallActive { whatsAppCallActive = source.whatsAppCallActive }
+        if whatsAppInCall != source.whatsAppInCall { whatsAppInCall = source.whatsAppInCall }
+        if whatsAppCallerName != source.whatsAppCallerName { whatsAppCallerName = source.whatsAppCallerName }
+        if whatsAppCallTypeLabel != source.whatsAppCallTypeLabel { whatsAppCallTypeLabel = source.whatsAppCallTypeLabel }
+        if whatsAppCallDurationSeconds != source.whatsAppCallDurationSeconds { whatsAppCallDurationSeconds = source.whatsAppCallDurationSeconds }
+        if whatsAppIsMuted != source.whatsAppIsMuted { whatsAppIsMuted = source.whatsAppIsMuted }
+        if whatsAppMessageActive != source.whatsAppMessageActive { whatsAppMessageActive = source.whatsAppMessageActive }
+        if whatsAppMessages.map(\.fingerprint) != source.whatsAppMessages.map(\.fingerprint) { whatsAppMessages = source.whatsAppMessages }
+        if whatsAppAvatarImages.keys.sorted() != source.whatsAppAvatarImages.keys.sorted() { whatsAppAvatarImages = source.whatsAppAvatarImages }
+        if whatsAppOverflowCount != source.whatsAppOverflowCount { whatsAppOverflowCount = source.whatsAppOverflowCount }
+    }
 
     override var isFlipped: Bool { false }
 
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        registerForDraggedTypes([
-            .fileURL,
-            Self.publicURLPasteboardType,
-            Self.legacyFilenamesPasteboardType
-        ])
-    }
-
     override func hitTest(_ point: NSPoint) -> NSView? {
         let localPoint = superview.map { convert(point, from: $0) } ?? point
-        let isDragEvent = NSApp.currentEvent?.type == .leftMouseDragged
-        let dropIsActive = fileDropHovering || fileDropURL != nil
-        guard Self.shouldReceivePointer(
-            at: localPoint,
-            in: bounds,
-            dragCaptureHeight: Self.dragCaptureHeight,
-            isDragInProgress: isDragEvent,
-            isDropActive: dropIsActive
-        ) else {
-            // The transparent drag receiver must not swallow normal clicks on
-            // windows beneath the notch. Keep it available while a drag is in flight.
-            return nil
-        }
+        guard Self.shouldReceivePointer(at: localPoint, in: bounds),
+              notchPath(in: bounds).contains(localPoint) else { return nil }
         return super.hitTest(point)
     }
 
-    static func shouldReceivePointer(
-        at point: NSPoint,
-        in bounds: NSRect,
-        dragCaptureHeight: CGFloat,
-        isDragInProgress: Bool,
-        isDropActive: Bool
-    ) -> Bool {
-        guard bounds.contains(point) else { return false }
-        return point.y >= dragCaptureHeight || isDragInProgress || isDropActive
+    static func shouldReceivePointer(at point: NSPoint, in bounds: NSRect) -> Bool {
+        bounds.contains(point)
     }
 
     private func notchPath(
@@ -1114,21 +1121,9 @@ final class NotchView: NSView, NSDraggingSource {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        if isMirror, let mirrorStateSource { copyVisualState(from: mirrorStateSource) }
         let context = NSGraphicsContext.current?.cgContext
-        context?.saveGState()
-        context?.translateBy(x: 0, y: Self.dragCaptureHeight)
-        defer { context?.restoreGState() }
-        let bounds = NSRect(
-            x: 0,
-            y: 0,
-            width: self.bounds.width,
-            height: max(0, self.bounds.height - Self.dragCaptureHeight)
-        )
-
-        if fileDropHovering || fileDropURL != nil {
-            drawFileDrop(in: bounds)
-            return
-        }
+        let bounds = self.bounds
 
         if noNetworkAlertActive {
             drawNoNetworkAlert(in: bounds)
@@ -1225,46 +1220,9 @@ final class NotchView: NSView, NSDraggingSource {
         drawUnderlyingState(in: bounds)
     }
 
-    private func drawFileDrop(in bounds: NSRect) {
-        fillPitchBlack(notchPath(in: bounds, cornerRadius: 22))
-
-        let visibleHeight = max(0, bounds.height - (NSScreen.notchScreen?.safeAreaInsets.top ?? 34))
-        guard let fileDropURL else {
-            drawNotificationText(
-                "Drop file here",
-                in: NSRect(x: 20, y: max(0, (visibleHeight - 20) / 2), width: bounds.width - 40, height: 20),
-                size: 12,
-                weight: .medium,
-                color: NSColor(white: 0.64, alpha: 0.76)
-            )
-            return
-        }
-
-        let image = fileDropThumbnail ?? NSImage(systemSymbolName: "doc.fill", accessibilityDescription: "File")
-        image?.draw(in: NSRect(x: 19, y: max(16, visibleHeight - 94), width: 70, height: 70))
-
-        let name = fileDropURL.lastPathComponent
-        drawNotificationText(name, in: NSRect(x: 101, y: visibleHeight - 43, width: bounds.width - 119, height: 20), size: 13, weight: .bold, color: .white)
-        let detail = fileDropURL.hasDirectoryPath ? "Folder · drag the preview out to move it" : "File · drag the preview out to move it"
-        drawNotificationText(detail, in: NSRect(x: 101, y: visibleHeight - 66, width: bounds.width - 119, height: 16), size: 10, weight: .medium, color: NSColor(white: 0.72, alpha: 1))
-
-        let labels = ["AirDrop", "Copy", "Rename", "Delete"]
-        for (index, label) in labels.enumerated() {
-            let rect = Self.fileActionRect(index: index, in: bounds)
-            let path = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
-            (index == 3 ? NSColor(calibratedRed: 0.36, green: 0.12, blue: 0.13, alpha: 1) : NSColor(white: 0.18, alpha: 1)).setFill()
-            path.fill()
-            let text = NSAttributedString(string: label, attributes: [
-                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-                .foregroundColor: index == 3 ? NSColor.systemRed : NSColor.white
-            ])
-            text.draw(at: NSPoint(x: rect.midX - text.size().width / 2, y: rect.midY - text.size().height / 2))
-        }
-    }
-
     private func drawNoNetworkAlert(in bounds: NSRect) {
         fillPitchBlack(notchPath(in: bounds, cornerRadius: 22))
-        let safeTop = NSScreen.notchScreen?.safeAreaInsets.top ?? 34
+        let safeTop = screenSafeAreaTop
         let visibleHeight = max(0, bounds.height - safeTop)
         guard let symbol = NSImage(systemSymbolName: "wifi.slash", accessibilityDescription: "No network") else { return }
         let sizeConfiguration = NSImage.SymbolConfiguration(pointSize: 34, weight: .medium)
@@ -1368,18 +1326,6 @@ final class NotchView: NSView, NSDraggingSource {
         string.draw(in: NSRect(x: x + 2, y: y, width: max(0, width - 4), height: 14))
     }
 
-    static func fileActionRect(index: Int, in bounds: NSRect) -> NSRect {
-        let gap: CGFloat = 7
-        let count: CGFloat = 4
-        let width = (bounds.width - 36 - gap * (count - 1)) / count
-        return NSRect(x: 18 + CGFloat(index) * (width + gap), y: 11, width: width, height: 28)
-    }
-
-    static let fileDropPanelSize = NSSize(width: 430, height: 190)
-    // Keep a transparent receiver below the hardware notch so file drags enter
-    // before macOS treats the screen edge as a Desktop target.
-    static let dragCaptureHeight: CGFloat = 100
-
     private func drawUnderlyingState(in bounds: NSRect) {
         if expanded {
             if mediaPlaying {
@@ -1416,7 +1362,7 @@ final class NotchView: NSView, NSDraggingSource {
 
         // The physical notch covers the top safe-area strip of this window.
         // Lay out all message text in the visible body below that strip.
-        let safeTop = NSScreen.notchScreen?.safeAreaInsets.top ?? 34
+        let safeTop = screenSafeAreaTop
         let visibleHeight = max(0, bounds.height - safeTop)
 
         let isGmail = message.service == "Gmail"
@@ -1442,15 +1388,15 @@ final class NotchView: NSView, NSDraggingSource {
             drawNotificationText(message.preview, in: NSRect(x: left, y: 2, width: width, height: 12), size: 9, weight: .regular, color: NSColor(white: 0.62, alpha: 1))
         }
 
-        let clearRect = Self.inboxClearAllRect(in: bounds)
+        let clearRect = clearAllRect(in: bounds)
         NSColor(white: 0.16, alpha: 1).setFill()
         NSBezierPath(roundedRect: clearRect, xRadius: 8, yRadius: 8).fill()
-        drawNotificationText("Clear all", in: clearRect.insetBy(dx: 3, dy: 2), size: 9, weight: .semibold, color: NSColor(white: 0.82, alpha: 1))
+        drawCenteredNotificationText("Clear all", in: clearRect, size: 9, weight: .semibold, color: NSColor(white: 0.82, alpha: 1))
     }
 
-    static func inboxClearAllRect(in bounds: NSRect) -> NSRect {
-        let visibleHeight = max(0, bounds.height - (NSScreen.notchScreen?.safeAreaInsets.top ?? 34))
-        return inboxClearAllRect(in: bounds, visibleHeight: visibleHeight)
+    private func clearAllRect(in bounds: NSRect) -> NSRect {
+        let visibleHeight = max(0, bounds.height - screenSafeAreaTop)
+        return Self.inboxClearAllRect(in: bounds, visibleHeight: visibleHeight)
     }
 
     static func inboxClearAllRect(in bounds: NSRect, visibleHeight: CGFloat) -> NSRect {
@@ -1459,6 +1405,15 @@ final class NotchView: NSView, NSDraggingSource {
 
     static func idlePanelHeight(safeAreaTop: CGFloat) -> CGFloat {
         max(34, safeAreaTop)
+    }
+
+    static func notchFrame(in displayFrame: NSRect, width: CGFloat, height: CGFloat) -> NSRect {
+        NSRect(
+            x: displayFrame.midX - width / 2,
+            y: displayFrame.maxY - height,
+            width: width,
+            height: height
+        )
     }
 
     private func drawNotificationText(_ text: String, in rect: NSRect, size: CGFloat, weight: NSFont.Weight, color: NSColor) {
@@ -1471,6 +1426,24 @@ final class NotchView: NSView, NSDraggingSource {
         ]).draw(in: rect)
     }
 
+    private func drawCenteredNotificationText(_ text: String, in rect: NSRect, size: CGFloat, weight: NSFont.Weight, color: NSColor) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byTruncatingTail
+        let attributed = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: size, weight: weight),
+            .foregroundColor: color,
+            .paragraphStyle: paragraph
+        ])
+        let textSize = attributed.size()
+        attributed.draw(in: NSRect(
+            x: rect.minX,
+            y: rect.midY - textSize.height / 2,
+            width: rect.width,
+            height: max(textSize.height, rect.height)
+        ))
+    }
+
     private func drawStartupLogo(in bounds: NSRect) {
         // The physical Mac notch occludes the top-center of the screen. Keep the
         // logo in the visible body beneath that cutout instead of centering it
@@ -1481,7 +1454,7 @@ final class NotchView: NSView, NSDraggingSource {
             .foregroundColor: NSColor.white
         ])
         let measured = logo.size()
-        let safeTop = NSScreen.notchScreen?.safeAreaInsets.top ?? 34
+        let safeTop = screenSafeAreaTop
         let visibleBodyHeight = max(40, bounds.height - safeTop)
         let origin = NSPoint(
             x: bounds.midX - measured.width / 2,
@@ -1489,7 +1462,7 @@ final class NotchView: NSView, NSDraggingSource {
         )
         logo.draw(at: origin)
 
-        let subtitle = NSAttributedString(string: "NotchOS 2", attributes: [
+        let subtitle = NSAttributedString(string: "NotchOS 2.1", attributes: [
             .font: NSFont.systemFont(ofSize: 10, weight: .medium),
             .foregroundColor: NSColor(white: 0.92, alpha: 1)
         ])
@@ -1537,7 +1510,7 @@ final class NotchView: NSView, NSDraggingSource {
         let rowStep: CGFloat = 38
         // A single notification is compact. Additional rows stack upward
         // while the top edge remains attached to the physical notch.
-        let safeTop = NSScreen.notchScreen?.safeAreaInsets.top ?? 34
+        let safeTop = screenSafeAreaTop
         let firstCenterY = Self.whatsAppFirstRowCenterY(in: bounds, safeTop: safeTop)
 
         for (index, message) in messages.enumerated() {
@@ -2118,27 +2091,12 @@ final class NotchView: NSView, NSDraggingSource {
 
     override func mouseDown(with event: NSEvent) {
         let viewPoint = convert(event.locationInWindow, from: nil)
-        let bounds = NSRect(
-            x: 0,
-            y: 0,
-            width: self.bounds.width,
-            height: self.bounds.height - Self.dragCaptureHeight
-        )
-        let loc = NSPoint(x: viewPoint.x, y: viewPoint.y - Self.dragCaptureHeight)
+        let bounds = self.bounds
+        let loc = viewPoint
         guard bounds.contains(loc) else { return }
 
         if event.modifierFlags.contains(.option) {
             onDeveloperModeClick?(event.modifierFlags.contains(.shift))
-            return
-        }
-
-        if let fileDropURL {
-            for index in 0..<4 where Self.fileActionRect(index: index, in: bounds).contains(loc) {
-                onFileAction?(["airdrop", "copy", "rename", "delete"][index], fileDropURL)
-                return
-            }
-            fileDragCandidate = fileDropURL
-            fileDragStartPoint = loc
             return
         }
 
@@ -2148,7 +2106,7 @@ final class NotchView: NSView, NSDraggingSource {
         }
 
         if incomingNotification != nil,
-           Self.inboxClearAllRect(in: bounds).contains(loc) {
+           clearAllRect(in: bounds).contains(loc) {
             onClearIncomingMessages?()
             return
         }
@@ -2169,7 +2127,6 @@ final class NotchView: NSView, NSDraggingSource {
             )
 
             if mute.contains(loc) {
-                whatsAppIsMuted.toggle()
                 onToggleWhatsAppMute?()
                 return
             } else if end.contains(loc) {
@@ -2220,6 +2177,7 @@ final class NotchView: NSView, NSDraggingSource {
                     return
                 }
             }
+            if isMirror { onMirrorToggleExpanded?(); return }
             // Clicking the compact YouTube indicator opens/closes its panel.
             expanded.toggle()
             onToggleExpanded?()
@@ -2227,128 +2185,30 @@ final class NotchView: NSView, NSDraggingSource {
             return
         }
 
+        if isMirror { onMirrorToggleExpanded?(); return }
         expanded.toggle()
         onToggleExpanded?()
         needsDisplay = true
     }
 
-    override func mouseDragged(with event: NSEvent) {
-        guard !isDraggingFileOut, let fileDragCandidate, let start = fileDragStartPoint else { return }
-        let location = convert(event.locationInWindow, from: nil)
-        let logicalLocation = NSPoint(x: location.x, y: location.y - Self.dragCaptureHeight)
-        guard hypot(logicalLocation.x - start.x, logicalLocation.y - start.y) > 4 else { return }
-
-        let item = NSDraggingItem(pasteboardWriter: fileDragCandidate as NSURL)
-        let image = fileDropThumbnail ?? NSWorkspace.shared.icon(forFile: fileDragCandidate.path)
-        item.setDraggingFrame(NSRect(x: location.x - 35, y: location.y - 35, width: 70, height: 70), contents: image)
-        isDraggingFileOut = true
-        beginDraggingSession(with: [item], event: event, source: self)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        fileDragCandidate = nil
-        fileDragStartPoint = nil
-    }
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard !isDraggingFileOut, Self.containsFileURL(in: sender.draggingPasteboard) else { return [] }
-        beginFileHover()
-        return .copy
-    }
-
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard !isDraggingFileOut, Self.containsFileURL(in: sender.draggingPasteboard) else { return [] }
-        if !fileDropHovering { beginFileHover() }
-        return .copy
-    }
-
-    override func draggingExited(_ sender: NSDraggingInfo?) {
-        fileHoverGeneration += 1
-        let generation = fileHoverGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
-            guard let self, self.fileHoverGeneration == generation, self.fileDropURL == nil else { return }
-            self.fileDropHovering = false
-            self.onFileDropHoverChanged?(false)
-        }
-    }
-
-    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        !isDraggingFileOut && Self.fileURL(from: sender.draggingPasteboard) != nil
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard !isDraggingFileOut, let url = Self.fileURL(from: sender.draggingPasteboard) else { return false }
-        fileHoverGeneration += 1
-        fileDropHovering = false
-        onFileDrop?(url)
-        return true
-    }
-
-    private func beginFileHover() {
-        fileHoverGeneration += 1
-        fileDropHovering = true
-        onFileDropHoverChanged?(true)
-    }
-
-    static let legacyFilenamesPasteboardType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
-    static let publicURLPasteboardType = NSPasteboard.PasteboardType("public.url")
-
-    private static func containsFileURL(in pasteboard: NSPasteboard) -> Bool {
-        if fileURL(from: pasteboard) != nil { return true }
-        if let string = pasteboard.string(forType: publicURLPasteboardType),
-           URL(string: string)?.isFileURL == true {
-            return true
-        }
-        return false
-    }
-
-    static func fileURL(from pasteboard: NSPasteboard) -> URL? {
-        if let objects = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]),
-           let first = objects.first {
-            let url = first as? URL ?? (first as? NSURL).map { $0 as URL }
-            if let url, url.isFileURL { return url }
-        }
-        let modernValue = pasteboard.propertyList(forType: .fileURL)
-            ?? pasteboard.propertyList(forType: publicURLPasteboardType)
-        let modernURLString = modernValue as? String
-            ?? (modernValue as? URL)?.absoluteString
-            ?? (modernValue as? NSURL)?.absoluteString
-            ?? pasteboard.string(forType: .fileURL)
-            ?? pasteboard.string(forType: publicURLPasteboardType)
-        let legacyValue = pasteboard.propertyList(forType: legacyFilenamesPasteboardType)
-        let legacyPaths: [String]?
-        if let paths = legacyValue as? [String] {
-            legacyPaths = paths
-        } else if let urls = legacyValue as? [URL] {
-            legacyPaths = urls.map(\.path)
-        } else if let urls = legacyValue as? [NSURL] {
-            legacyPaths = urls.compactMap(\.path)
-        } else {
-            legacyPaths = nil
-        }
-        return fileURL(
-            fileURLString: modernURLString,
-            legacyFilePaths: legacyPaths
-        )
-    }
-
-    static func fileURL(fileURLString: String?, legacyFilePaths: [String]?) -> URL? {
-        if let value = fileURLString, let url = URL(string: value), url.isFileURL { return url }
-        if let path = legacyFilePaths?.first { return URL(fileURLWithPath: path) }
-        return nil
-    }
-
-    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
-
-    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
-        isDraggingFileOut = false
-        fileDragCandidate = nil
-        fileDragStartPoint = nil
-        onFileDragEnded?()
-    }
 }
 
 // MARK: - App
+
+@MainActor
+private final class MirroredNotchDisplay {
+    let displayID: UInt32
+    let panel: NSPanel
+    let view: NotchView
+    let developerHost: DeveloperHostingView
+
+    init(displayID: UInt32, panel: NSPanel, view: NotchView, developerHost: DeveloperHostingView) {
+        self.displayID = displayID
+        self.panel = panel
+        self.view = view
+        self.developerHost = developerHost
+    }
+}
 
 @MainActor
 final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
@@ -2361,6 +2221,8 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
     private var panel: NSPanel!
     private var notch: NotchView!
+    private var mirroredNotches: [UInt32: MirroredNotchDisplay] = [:]
+    private var displaySyncTimer: Timer?
     private let developerMode = DeveloperModeManager()
     private var developerHost: DeveloperHostingView?
     private var developerSessionObservers: [NSObjectProtocol] = []
@@ -2410,14 +2272,14 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     // and Air displays differ, so use their live display geometry rather than
     // assuming a single model's notch height.
     private var idleHeight: CGFloat {
-        NotchView.idlePanelHeight(safeAreaTop: NSScreen.notchScreen?.safeAreaInsets.top ?? 34)
+        NotchView.idlePanelHeight(safeAreaTop: NSScreen.notchScreen?.safeAreaInsets.top ?? 0)
     }
     private let noNetworkAlertHeight: CGFloat = 104
     private let singleMessageHeight: CGFloat = 100
     private let messageRowHeight: CGFloat = 38
 
     private var currentWidth: CGFloat = 210
-    private var currentHeight: CGFloat = 34 + NotchView.dragCaptureHeight
+    private var currentHeight: CGFloat = 34
     private var resizeAnimationGeneration = 0
 
     private var lastVolume: Float?
@@ -2463,9 +2325,9 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
         let frame = NSRect(
             x: screen.frame.midX - idleWidth / 2,
-            y: screen.frame.maxY - idleHeight - NotchView.dragCaptureHeight,
+            y: screen.frame.maxY - idleHeight,
             width: idleWidth,
-            height: idleHeight + NotchView.dragCaptureHeight
+            height: idleHeight
         )
 
         panel = NSPanel(
@@ -2531,10 +2393,6 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             DeveloperEventLog.shared.append("Interface", self.notch.expanded ? "Notch expanded" : "Notch collapsed")
         }
 
-        notch.onFileDropHoverChanged = { [weak self] _ in self?.resizeWindow(animated: true) }
-        notch.onFileDrop = { [weak self] url in self?.showFilePreview(url) }
-        notch.onFileAction = { [weak self] action, url in self?.performFileAction(action, for: url) }
-        notch.onFileDragEnded = { [weak self] in self?.clearFilePreview() }
         notch.onClearIncomingMessages = { [weak self] in self?.clearIncomingMessagesToNotificationCenter() }
 
         notch.onControlClickLock = { [weak self] in
@@ -2567,6 +2425,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         notch.onToggleWhatsAppMute = {
+            self.notch.whatsAppIsMuted.toggle()
             WhatsAppMonitor.toggleMute()
         }
 
@@ -2588,6 +2447,20 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             self.notch.needsDisplay = true
             ChromeYouTube.performVideoAction("seek", seekSeconds: seconds, tabID: tabID, videoID: self.currentMediaVideoID)
         }
+
+        refreshMirroredDisplays()
+        let screenChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshMirroredDisplays() }
+        }
+        systemStateObservers.append(screenChangeObserver)
+        displaySyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.syncMirroredNotches(animated: false) }
+        }
+        if let displaySyncTimer { RunLoop.main.add(displaySyncTimer, forMode: .common) }
 
         panel.orderFrontRegardless()
 
@@ -2615,6 +2488,119 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             self.notch.expanded = false
             self.resizeWindow(animated: true)
             self.startPolling()
+        }
+    }
+
+    private func displayID(for screen: NSScreen) -> UInt32? {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+
+    private func refreshMirroredDisplays() {
+        guard let primaryScreen = NSScreen.notchScreen, let primaryID = displayID(for: primaryScreen) else { return }
+        let externalScreens = NSScreen.screens.filter { displayID(for: $0) != primaryID }
+        let currentIDs = Set(externalScreens.compactMap { displayID(for: $0) })
+        let disconnectedIDs = mirroredNotches.keys.filter { !currentIDs.contains($0) }
+        for identifier in disconnectedIDs {
+            mirroredNotches[identifier]?.panel.orderOut(nil)
+            mirroredNotches.removeValue(forKey: identifier)
+        }
+
+        for screen in externalScreens {
+            guard let identifier = displayID(for: screen), mirroredNotches[identifier] == nil else { continue }
+            let width = idleWidth
+            let height = NotchView.idlePanelHeight(safeAreaTop: screen.safeAreaInsets.top)
+            let frame = NotchView.notchFrame(in: screen.frame, width: width, height: height)
+            let mirrorPanel = NSPanel(
+                contentRect: frame,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            mirrorPanel.level = .statusBar
+            mirrorPanel.backgroundColor = .clear
+            mirrorPanel.isOpaque = false
+            mirrorPanel.hasShadow = false
+            mirrorPanel.ignoresMouseEvents = false
+            mirrorPanel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+
+            let mirrorView = NotchView(frame: NSRect(origin: .zero, size: frame.size))
+            mirrorView.autoresizingMask = [.width, .height]
+            mirrorView.isMirror = true
+            mirrorView.mirrorStateSource = notch
+            mirrorView.onDeveloperModeClick = notch.onDeveloperModeClick
+            mirrorView.onControlClickLock = notch.onControlClickLock
+            mirrorView.onAcceptWhatsAppCall = notch.onAcceptWhatsAppCall
+            mirrorView.onDeclineWhatsAppCall = notch.onDeclineWhatsAppCall
+            mirrorView.onToggleWhatsAppMute = notch.onToggleWhatsAppMute
+            mirrorView.onMediaPlayPause = notch.onMediaPlayPause
+            mirrorView.onMediaSeek = notch.onMediaSeek
+            mirrorView.onClearIncomingMessages = notch.onClearIncomingMessages
+            mirrorView.onMirrorToggleExpanded = { [weak self] in
+                guard let self else { return }
+                self.notch.expanded.toggle()
+                self.notch.onToggleExpanded?()
+            }
+            mirrorPanel.contentView = mirrorView
+
+            let mirrorHost = DeveloperHostingView(rootView: DeveloperOverlayRoot(
+                manager: developerMode,
+                snapshotProvider: { [weak self] in await self?.makeDeveloperSnapshot() ?? .environment },
+                playbackAction: { [weak self] shouldPlay in self?.developerSetPlayback(shouldPlay: shouldPlay) },
+                dismissActivity: { [weak self] identifier in self?.developerDismissActivity(identifier) },
+                openSettings: { [weak self] in self?.openDeveloperSystemSettings() },
+                returnToDefault: { [weak self] in self?.developerReturnToDefaultState() }
+            ))
+            mirrorHost.safeAreaRegions = []
+            mirrorHost.onDeveloperClick = notch.onDeveloperModeClick
+            mirroredNotches[identifier] = MirroredNotchDisplay(
+                displayID: identifier, panel: mirrorPanel, view: mirrorView, developerHost: mirrorHost
+            )
+            mirrorPanel.orderFrontRegardless()
+        }
+        syncMirroredNotches(animated: false)
+        applyDeveloperPresentationToMirrors(developerMode.presentation)
+    }
+
+    private func syncMirroredNotches(animated: Bool, durationOverride: TimeInterval? = nil) {
+        guard panel != nil else { return }
+        for mirror in mirroredNotches.values {
+            guard let screen = NSScreen.screens.first(where: { displayID(for: $0) == mirror.displayID }) else { continue }
+            mirror.view.copyVisualState(from: notch)
+            let height = developerMode.presentation == .closed && abs(currentHeight - idleHeight) < 1
+                ? NotchView.idlePanelHeight(safeAreaTop: screen.safeAreaInsets.top)
+                : currentHeight
+            let frame = NotchView.notchFrame(in: screen.frame, width: currentWidth, height: height)
+            let oldFrame = mirror.panel.frame
+            guard abs(oldFrame.origin.x - frame.origin.x) > 1
+                    || abs(oldFrame.origin.y - frame.origin.y) > 1
+                    || abs(oldFrame.width - frame.width) > 1
+                    || abs(oldFrame.height - frame.height) > 1 else { continue }
+            if animated {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = durationOverride ?? max(0.12, DeveloperAnimationSettings.shared.effectiveExpansionDuration)
+                    context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    context.allowsImplicitAnimation = true
+                    mirror.panel.animator().setFrame(frame, display: true)
+                }
+            } else {
+                mirror.panel.setFrame(frame, display: true)
+            }
+        }
+    }
+
+    private func applyDeveloperPresentationToMirrors(_ presentation: DeveloperModePresentation) {
+        let interactive = presentation == .authenticating || presentation == .console
+        for mirror in mirroredNotches.values {
+            var style = mirror.panel.styleMask
+            if interactive { style.remove(.nonactivatingPanel) } else { style.insert(.nonactivatingPanel) }
+            mirror.panel.styleMask = style
+            mirror.panel.level = .statusBar
+            if presentation == .closed {
+                if mirror.panel.contentView !== mirror.view { mirror.panel.contentView = mirror.view }
+            } else if mirror.panel.contentView !== mirror.developerHost {
+                mirror.panel.contentView = mirror.developerHost
+            }
+            if interactive { mirror.panel.orderFrontRegardless() }
         }
     }
 
@@ -2654,6 +2640,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             : settings.effectiveExpansionDuration * 1.75
         resizeWindow(animated: true, durationOverride: transitionDuration)
         DeveloperEventLog.shared.append("Console", presentation == .console ? "Developer console opened" : "Developer authentication panel shown")
+        applyDeveloperPresentationToMirrors(presentation)
     }
 
     private func installDeveloperSessionObservers() {
@@ -2751,13 +2738,6 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
                 id: "whatsapp-call", name: "WhatsApp call", kind: "Communication", state: notch.whatsAppInCall ? "In call" : "Incoming",
                 startedAt: nil, visibleInNotch: !presentationIsVisible,
                 details: "Call controls remain active", canTogglePlayback: false, canDismiss: false
-            ))
-        }
-        if notch.fileDropURL != nil || notch.fileDropHovering {
-            activities.append(DeveloperActivity(
-                id: "file-drop", name: "File transfer preview", kind: "File", state: notch.fileDropURL == nil ? "Drop target active" : "Preview ready",
-                startedAt: nil, visibleInNotch: !presentationIsVisible,
-                details: "File name and path omitted", canTogglePlayback: false, canDismiss: false
             ))
         }
         if notch.lowBatteryAlertPercent != nil || notch.noNetworkAlertActive {
@@ -3808,86 +3788,6 @@ private func animateVolumeHUD(to target: CGFloat) {
         }.resume()
     }
 
-    private func showFilePreview(_ url: URL) {
-        notch.fileDropURL = url
-        notch.fileDropHovering = false
-        notch.fileDropThumbnail = NSWorkspace.shared.icon(forFile: url.path)
-        resizeWindow(animated: true)
-
-        let request = QLThumbnailGenerator.Request(
-            fileAt: url,
-            size: CGSize(width: 200, height: 200),
-            scale: NSScreen.main?.backingScaleFactor ?? 2,
-            representationTypes: .all
-        )
-        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self] thumbnail, _ in
-            guard let image = thumbnail?.nsImage else { return }
-            Task { @MainActor [weak self] in
-                guard let self, self.notch.fileDropURL == url else { return }
-                self.notch.fileDropThumbnail = image
-            }
-        }
-    }
-
-    private func clearFilePreview() {
-        notch.fileDropURL = nil
-        notch.fileDropThumbnail = nil
-        notch.fileDropHovering = false
-        resizeWindow(animated: true)
-    }
-
-    private func performFileAction(_ action: String, for url: URL) {
-        switch action {
-        case "airdrop":
-            NSSharingService(named: .sendViaAirDrop)?.perform(withItems: [url])
-        case "copy":
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.writeObjects([url as NSURL])
-        case "delete":
-            do {
-                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-                clearFilePreview()
-            } catch {
-                presentFileError("Could not move the item to Trash", error: error)
-            }
-        case "rename":
-            renameFile(url)
-        default:
-            break
-        }
-    }
-
-    private func renameFile(_ url: URL) {
-        let alert = NSAlert()
-        alert.messageText = "Rename Item"
-        alert.informativeText = "Enter a new name for \(url.lastPathComponent)."
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        let input = NSTextField(string: url.lastPathComponent)
-        input.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
-        alert.accessoryView = input
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let newName = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !newName.isEmpty, newName != url.lastPathComponent else { return }
-        let destination = url.deletingLastPathComponent().appendingPathComponent(newName)
-        do {
-            try FileManager.default.moveItem(at: url, to: destination)
-            showFilePreview(destination)
-        } catch {
-            presentFileError("Could not rename the item", error: error)
-        }
-    }
-
-    private func presentFileError(_ title: String, error: Error) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = error.localizedDescription
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
-
     // MARK: Window Geometry
 
     private func resizeWindow(animated: Bool = true, durationOverride: TimeInterval? = nil) {
@@ -3902,9 +3802,6 @@ private func animateVolumeHUD(to target: CGFloat) {
         } else if developerMode.presentation == .authenticating || developerMode.presentation.isDeveloperMessage {
             targetWidth = 410
             targetHeight = 168
-        } else if notch.fileDropURL != nil || notch.fileDropHovering {
-            targetWidth = NotchView.fileDropPanelSize.width
-            targetHeight = NotchView.fileDropPanelSize.height
         } else if notch.noNetworkAlertActive {
             targetWidth = idleWidth
             targetHeight = noNetworkAlertHeight
@@ -3956,7 +3853,7 @@ private func animateVolumeHUD(to target: CGFloat) {
             targetHeight = idleHeight
         }
 
-        let windowHeight = targetHeight + NotchView.dragCaptureHeight
+        let windowHeight = targetHeight
 
         // Keep the top edge aligned with the physical screen edge in every
         // state, so the notification grows down from the original notch.
@@ -3973,6 +3870,7 @@ private func animateVolumeHUD(to target: CGFloat) {
                 || abs(currentHeight - windowHeight) > 1
                 || abs(panel.frame.origin.y - panelY) > 1
                 || abs(panel.frame.origin.x - frame.origin.x) > 1 else {
+            syncMirroredNotches(animated: false)
             return
         }
 
@@ -3991,6 +3889,7 @@ private func animateVolumeHUD(to target: CGFloat) {
             if settings.reduceMotion || duration == 0 {
                 panel.setFrame(frame, display: true)
                 notch.needsDisplay = true
+                syncMirroredNotches(animated: false)
                 return
             }
             let animationDuration = durationOverride ?? (notch.appSwitchIcon != nil
@@ -4007,6 +3906,7 @@ private func animateVolumeHUD(to target: CGFloat) {
             panel.setFrame(frame, display: true)
             notch.needsDisplay = true
         }
+        syncMirroredNotches(animated: animated, durationOverride: durationOverride)
     }
 
     /// Apply a subtle, adjustable overshoot to the shared notch window resize.
@@ -4075,6 +3975,10 @@ private func animateVolumeHUD(to target: CGFloat) {
 
     func applicationWillTerminate(_ notification: Notification) {
         developerMode.lockDeveloperMode(reason: .applicationTerminated)
+        displaySyncTimer?.invalidate()
+        displaySyncTimer = nil
+        for mirror in mirroredNotches.values { mirror.panel.orderOut(nil) }
+        mirroredNotches.removeAll()
         timers.forEach { $0.invalidate() }
         timers.removeAll()
 

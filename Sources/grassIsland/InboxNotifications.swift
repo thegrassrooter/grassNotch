@@ -4,6 +4,7 @@ import UserNotifications
 
 /// Delivers incoming inbox messages through the system Notification Center.
 enum InboxNotifications {
+    static let maximumBundleNotifications = 30
     /// UserNotifications requires the process to have a registered .app bundle.
     /// A bare `swift run` executable has no bundle proxy, and asking for the
     /// system notification center in that process raises an Objective-C
@@ -122,35 +123,29 @@ enum InboxNotifications {
         }
     }
 
-    /// Posts one Notification Center entry summarizing a backlog or a group
-    /// the user explicitly cleared from the notch.
+    /// Posts at most 30 original messages, grouped into one Notification Center
+    /// thread. This bounds Notification Center work even after a long offline period.
     static func postBundle(_ messages: [InboxMessage]) {
         guard hasApplicationBundle, !messages.isEmpty else { return }
-        UNUserNotificationCenter.current().add(
-            UNNotificationRequest(
-                identifier: "grassIsland.inbox.bundle.\(UUID().uuidString)",
-                content: bundleContent(for: messages),
+        let center = UNUserNotificationCenter.current()
+        for (index, messageContent) in bundleContents(for: messages).enumerated() {
+            center.add(UNNotificationRequest(
+                identifier: "grassIsland.inbox.bundle.\(UUID().uuidString).\(index)",
+                content: messageContent,
                 trigger: nil
-            )
-        ) { error in
-            if let error { NSLog("[InboxNotifications] failed to post message bundle: %@", error.localizedDescription) }
+            )) { error in
+                if let error { NSLog("[InboxNotifications] failed to post bundled message: %@", error.localizedDescription) }
+            }
         }
     }
 
-    static func bundleContent(for messages: [InboxMessage]) -> UNMutableNotificationContent {
-        let gmailCount = messages.filter { $0.service == "Gmail" }.count
-        let whatsAppCount = messages.count - gmailCount
-        let summary = [
-            gmailCount > 0 ? "Gmail \(gmailCount)" : nil,
-            whatsAppCount > 0 ? "WhatsApp \(whatsAppCount)" : nil
-        ].compactMap { $0 }.joined(separator: " · ")
-        let content = UNMutableNotificationContent()
-        content.title = "Unread messages"
-        content.subtitle = summary
-        content.body = "\(messages.count) unread message\(messages.count == 1 ? "" : "s") moved to Notification Center."
-        content.threadIdentifier = "inbox-bundle"
-        content.userInfo = ["sourceURL": "https://mail.google.com/mail/u/0/#inbox"]
-        return content
+    static func bundleContents(for messages: [InboxMessage], limit: Int = 30) -> [UNMutableNotificationContent] {
+        guard limit > 0 else { return [] }
+        return messages.prefix(min(limit, maximumBundleNotifications)).map { message in
+            let messageContent = content(for: message)
+            messageContent.threadIdentifier = "inbox-bundle-\(message.service.lowercased())"
+            return messageContent
+        }
     }
 
     @MainActor

@@ -168,16 +168,22 @@ struct GrassIslandRegressionRunner {
                 && content.threadIdentifier.contains("gmail")
         }
 
-        run("message backlog becomes one Notification Center bundle", failures: &failures) {
+        run("message bundle preserves real message content and is capped at 30 notifications", failures: &failures) {
             let messages = [
                 InboxMessage(id: "1", service: "Gmail", account: "me@example.com", sender: "Ada", senderEmail: "ada@example.org", subject: "One", preview: "", receivedAt: Date(), fingerprint: "g1", sourceURL: "https://mail.google.com", isRead: false),
                 InboxMessage(id: "2", service: "WhatsApp", account: "WhatsApp Web", sender: "Lin", senderEmail: "", subject: "Two", preview: "Hi", receivedAt: Date(), fingerprint: "w1", sourceURL: "https://web.whatsapp.com", isRead: false)
             ]
-            let content = InboxNotifications.bundleContent(for: messages)
-            return content.title == "Unread messages"
-                && content.subtitle == "Gmail 1 · WhatsApp 1"
-                && content.body.contains("2 unread messages")
-                && content.threadIdentifier == "inbox-bundle"
+            let contents = InboxNotifications.bundleContents(for: messages)
+            let largeBatch = (0..<100).map { index in
+                InboxMessage(id: "\(index)", service: "Gmail", account: "me@example.com", sender: "Sender \(index)", senderEmail: "sender@example.org", subject: "Subject \(index)", preview: "Body \(index)", receivedAt: Date(), fingerprint: "g\(index)", sourceURL: "https://mail.google.com", isRead: false)
+            }
+            return contents.count == 2
+                && contents[0].title == "Gmail · Ada"
+                && contents[0].body.contains("ada@example.org")
+                && contents[1].title == "WhatsApp · Lin"
+                && contents[1].body == "Hi"
+                && contents.allSatisfy { $0.threadIdentifier.hasPrefix("inbox-bundle-") }
+                && InboxNotifications.bundleContents(for: largeBatch).count == InboxNotifications.maximumBundleNotifications
         }
 
         run("notch idle height follows display safe-area depth and clear-all target fits", failures: &failures) {
@@ -188,6 +194,18 @@ struct GrassIslandRegressionRunner {
                 && NotchView.idlePanelHeight(safeAreaTop: 30) == 34
                 && bounds.contains(clear)
                 && clear.width >= 60 && clear.height >= 18
+        }
+
+        run("each connected display gets its own top-centered notch frame", failures: &failures) {
+            let firstDisplay = NSRect(x: 0, y: 0, width: 1920, height: 1080)
+            let secondDisplay = NSRect(x: 1920, y: -120, width: 2560, height: 1440)
+            let first = NotchView.notchFrame(in: firstDisplay, width: 210, height: 44)
+            let second = NotchView.notchFrame(in: secondDisplay, width: 210, height: 44)
+            return first.midX == firstDisplay.midX
+                && second.midX == secondDisplay.midX
+                && first.maxY == firstDisplay.maxY
+                && second.maxY == secondDisplay.maxY
+                && first.origin != second.origin
         }
 
         run("Gmail and WhatsApp use real bundled brand marks for notch and notification imagery", failures: &failures) {
@@ -228,49 +246,11 @@ struct GrassIslandRegressionRunner {
                 && back.maxX < play.minX && play.maxX < forward.minX
         }
 
-        run("transparent notch drag receiver passes ordinary clicks through to underlying windows", failures: &failures) {
-            let bounds = NSRect(x: 0, y: 0, width: 210, height: 134)
-            let invisibleStripPoint = NSPoint(x: 100, y: 50)
-            let visiblePanelPoint = NSPoint(x: 100, y: 115)
-            let outsidePoint = NSPoint(x: 230, y: 115)
-            return !NotchView.shouldReceivePointer(
-                    at: invisibleStripPoint, in: bounds, dragCaptureHeight: 100,
-                    isDragInProgress: false, isDropActive: false
-                )
-                && NotchView.shouldReceivePointer(
-                    at: invisibleStripPoint, in: bounds, dragCaptureHeight: 100,
-                    isDragInProgress: true, isDropActive: false
-                )
-                && NotchView.shouldReceivePointer(
-                    at: invisibleStripPoint, in: bounds, dragCaptureHeight: 100,
-                    isDragInProgress: false, isDropActive: true
-                )
-                && NotchView.shouldReceivePointer(
-                    at: visiblePanelPoint, in: bounds, dragCaptureHeight: 100,
-                    isDragInProgress: false, isDropActive: false
-                )
-                && !NotchView.shouldReceivePointer(
-                    at: outsidePoint, in: bounds, dragCaptureHeight: 100,
-                    isDragInProgress: false, isDropActive: false
-                )
-        }
-
-        run("file drop has an expanded drag target and four actions inside its panel", failures: &failures) {
-            let size = NotchView.fileDropPanelSize
-            let bounds = NSRect(origin: .zero, size: size)
-            let actions = (0..<4).map { NotchView.fileActionRect(index: $0, in: bounds) }
-            return size.width > 400 && size.height > 150
-                && NotchView.dragCaptureHeight >= 80
-                && NotchView.publicURLPasteboardType.rawValue == "public.url"
-                && actions.allSatisfy { bounds.contains($0) }
-                && zip(actions, actions.dropFirst()).allSatisfy { $0.maxX < $1.minX }
-        }
-
-        run("Finder file URL and legacy path representations are accepted", failures: &failures) {
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent("grassIsland-drop-test.txt")
-            let modern = NotchView.fileURL(fileURLString: url.absoluteString, legacyFilePaths: nil)
-            let legacy = NotchView.fileURL(fileURLString: nil, legacyFilePaths: [url.path])
-            return modern == url && legacy == url
+        run("notch input surface is limited to its visible bounds", failures: &failures) {
+            let bounds = NSRect(x: 0, y: 0, width: 210, height: 34)
+            return NotchView.shouldReceivePointer(at: NSPoint(x: 100, y: 20), in: bounds)
+                && !NotchView.shouldReceivePointer(at: NSPoint(x: 100, y: 50), in: bounds)
+                && !NotchView.shouldReceivePointer(at: NSPoint(x: 230, y: 20), in: bounds)
         }
 
         run("app bundle provides a real icon for Notification Center", failures: &failures) {
@@ -322,7 +302,7 @@ struct GrassIslandRegressionRunner {
             x: bounds.minX,
             y: bounds.minY,
             width: bounds.width,
-            height: bounds.height + NotchView.dragCaptureHeight
+            height: bounds.height
         ))
         guard let iconRepresentation = NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16,
