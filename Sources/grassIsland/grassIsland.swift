@@ -2049,10 +2049,8 @@ final class NotchView: NSView {
         let width = bounds.width
         let height = bounds.height
 
-        // A restrained inset surface gives the controls a clear hierarchy while
-        // preserving the black notch silhouette around it.
-        let surface = NSRect(x: 7, y: 7, width: width - 14, height: height - 14)
-        fillPitchBlack(NSBezierPath(roundedRect: surface, xRadius: 21, yRadius: 21))
+        // The outer notch path is the only panel surface. A second inset rounded
+        // rectangle made the expanded controls read as a separate floating notch.
 
         // Compact top metadata row, spaced away from the thumbnail/title row.
         drawText(currentTimeText, x: 19, y: height - 28, size: 10, weight: .semibold)
