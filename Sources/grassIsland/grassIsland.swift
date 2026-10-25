@@ -1983,7 +1983,7 @@ final class NotchView: NSView {
         NSColor.white.setFill()
         triangle.fill()
 
-        guard !mediaPaused else { return }
+        guard !mediaPaused, DeveloperAnimationSettings.shared.youtubeAudioAnimationEnabled else { return }
         for index in 0..<4 {
             let barWidth: CGFloat = 3
             let gap: CGFloat = 3

@@ -69,13 +69,19 @@ final class DeveloperAnimationSettings: ObservableObject {
     @Published var expansionDuration: Double { didSet { persist("expansionDuration", expansionDuration) } }
     @Published var collapseDuration: Double { didSet { persist("collapseDuration", collapseDuration) } }
     @Published var springResponsiveness: Double { didSet { persist("springResponsiveness", springResponsiveness) } }
+    @Published var youtubeAudioAnimationEnabled: Bool {
+        didSet { defaults.set(youtubeAudioAnimationEnabled, forKey: Self.youtubeAudioAnimationKey) }
+    }
     @Published var previewMaterialEnabled = true
+
+    private static let youtubeAudioAnimationKey = "grassIsland.developer.animation.youtubeAudioAnimationEnabled"
 
     private init() {
         speed = Self.read("speed", fallback: 1, range: 0.5...2)
         expansionDuration = Self.read("expansionDuration", fallback: 0.29, range: 0.12...0.65)
         collapseDuration = Self.read("collapseDuration", fallback: 0.26, range: 0.12...0.65)
         springResponsiveness = Self.read("springResponsiveness", fallback: 0.55, range: 0...1)
+        youtubeAudioAnimationEnabled = UserDefaults.standard.object(forKey: Self.youtubeAudioAnimationKey) as? Bool ?? true
     }
 
     private static func read(_ key: String, fallback: Double, range: ClosedRange<Double>) -> Double {
@@ -92,6 +98,7 @@ final class DeveloperAnimationSettings: ObservableObject {
         expansionDuration = 0.29
         collapseDuration = 0.26
         springResponsiveness = 0.55
+        youtubeAudioAnimationEnabled = true
         previewMaterialEnabled = true
     }
 
@@ -100,6 +107,7 @@ final class DeveloperAnimationSettings: ObservableObject {
         expansionDuration = Self.read("expansionDuration", fallback: 0.29, range: 0.12...0.65)
         collapseDuration = Self.read("collapseDuration", fallback: 0.26, range: 0.12...0.65)
         springResponsiveness = Self.read("springResponsiveness", fallback: 0.55, range: 0...1)
+        youtubeAudioAnimationEnabled = defaults.object(forKey: Self.youtubeAudioAnimationKey) as? Bool ?? true
     }
 
     var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
@@ -690,6 +698,10 @@ struct DeveloperConsoleView: View {
                 settingSlider("Collapse", value: $animationSettings.collapseDuration, range: 0.12...0.65, format: "%.2fs")
                 settingSlider("Bounce", value: $animationSettings.springResponsiveness, range: 0...1, format: "%.2f")
                 Text("Subtle overshoot applies to every notch expand and collapse.")
+                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                Toggle("YouTube audio animation", isOn: $animationSettings.youtubeAudioAnimationEnabled)
+                    .font(.system(size: 10)).tint(.green)
+                Text("When off, the YouTube logo remains visible but its animated audio bars are hidden.")
                     .font(.system(size: 9)).foregroundStyle(.secondary)
                 Toggle("Preview material effects", isOn: $animationSettings.previewMaterialEnabled)
                     .font(.system(size: 10)).tint(.green)
