@@ -128,13 +128,17 @@ enum InboxNotifications {
     static func postBundle(_ messages: [InboxMessage]) {
         guard hasApplicationBundle, !messages.isEmpty else { return }
         let center = UNUserNotificationCenter.current()
-        for (index, messageContent) in bundleContents(for: messages).enumerated() {
-            center.add(UNNotificationRequest(
-                identifier: "grassIsland.inbox.bundle.\(UUID().uuidString).\(index)",
-                content: messageContent,
-                trigger: nil
-            )) { error in
-                if let error { NSLog("[InboxNotifications] failed to post bundled message: %@", error.localizedDescription) }
+        let requests = bundleRequests(for: messages)
+        for request in requests {
+            let notificationTitle = request.content.title
+            center.add(request) { error in
+                if let error {
+                    NSLog("[InboxNotifications] failed to post bundled message: %@", error.localizedDescription)
+                    print("[InboxNotifications] failed to post bundled message: \(error.localizedDescription)")
+                } else {
+                    NSLog("[InboxNotifications] queued message notification: %@", notificationTitle)
+                    print("[InboxNotifications] queued message notification: \(notificationTitle)")
+                }
             }
         }
     }
@@ -145,6 +149,17 @@ enum InboxNotifications {
             let messageContent = content(for: message)
             messageContent.threadIdentifier = "inbox-bundle-\(message.service.lowercased())"
             return messageContent
+        }
+    }
+
+    static func bundleRequests(for messages: [InboxMessage]) -> [UNNotificationRequest] {
+        let batchID = UUID().uuidString
+        return bundleContents(for: messages).enumerated().map { index, messageContent in
+            UNNotificationRequest(
+                identifier: "grassIsland.inbox.bundle.\(batchID).\(index)",
+                content: messageContent,
+                trigger: nil
+            )
         }
     }
 
@@ -168,18 +183,37 @@ enum InboxNotifications {
             return (false, "Notification authorization status: \(settings.authorizationStatus.rawValue)")
         }
         let identifier = "grassIsland-regression-\(UUID().uuidString)"
-        let content = UNMutableNotificationContent()
-        content.title = "grassIsland regression test"
-        content.subtitle = "Notification Center delivery"
-        content.body = "This test notification verifies system delivery."
-        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        let sample = InboxMessage(
+            id: identifier,
+            service: "Gmail",
+            account: "recipient@example.com",
+            sender: "Regression Sender",
+            senderEmail: "sender@example.com",
+            subject: "Notification delivery check",
+            preview: "Sample message content",
+            receivedAt: Date(),
+            fingerprint: identifier,
+            sourceURL: "https://mail.google.com/",
+            isRead: false
+        )
+        guard let request = bundleRequests(for: [sample]).first else {
+            return (false, "Could not create a message notification request.")
+        }
+        let smokeRequest = UNNotificationRequest(identifier: identifier, content: request.content, trigger: nil)
         do {
-            try await center.add(request)
+            try await center.add(smokeRequest)
             try await Task.sleep(for: .seconds(1))
-            let found = await center.deliveredNotifications().contains { $0.request.identifier == identifier }
+            let found = await center.deliveredNotifications().contains {
+                $0.request.identifier == identifier
+                    && $0.request.content.title == "Gmail · Regression Sender"
+                    && $0.request.content.subtitle == "Notification delivery check"
+                    && $0.request.content.body.contains("Sample message content")
+            }
+            center.removePendingNotificationRequests(withIdentifiers: [identifier])
+            center.removeDeliveredNotifications(withIdentifiers: [identifier])
             return (found, found
-                ? "Test notification is present in Notification Center."
-                : "Notification was accepted but is not in the delivered list.")
+                ? "A real Gmail message notification appeared in Notification Center with its subject and body."
+                : "The message notification request was accepted but the expected title, subject, and body were not found in Notification Center.")
         } catch {
             return (false, "Notification add failed: \(error.localizedDescription)")
         }

@@ -1065,6 +1065,46 @@ final class NotchView: NSView {
         bounds.contains(point)
     }
 
+    static func shouldAcceptPointer(
+        at point: NSPoint,
+        in bounds: NSRect,
+        safeAreaTop: CGFloat,
+        extraHitTargets: [NSRect] = []
+    ) -> Bool {
+        let notchHeight = min(bounds.height, max(34, safeAreaTop))
+        let physicalNotch = NSRect(
+            x: bounds.midX - 105,
+            y: bounds.maxY - notchHeight,
+            width: 210,
+            height: notchHeight
+        )
+        return physicalNotch.contains(point) || extraHitTargets.contains(where: { $0.contains(point) })
+    }
+
+    func shouldAcceptPointer(at point: NSPoint) -> Bool {
+        var extraTargets: [NSRect] = []
+        if incomingNotification != nil { extraTargets.append(clearAllRect(in: bounds)) }
+        if mediaPlaying && expanded {
+            extraTargets.append(Self.mediaPlayControlRect(in: bounds))
+            extraTargets.append(Self.mediaBackControlRect(in: bounds))
+            extraTargets.append(Self.mediaForwardControlRect(in: bounds))
+        }
+        if whatsAppInCall {
+            extraTargets.append(NSRect(x: bounds.maxX - 104, y: bounds.midY - 9, width: 44, height: 18))
+            extraTargets.append(NSRect(x: bounds.maxX - 54, y: bounds.midY - 9, width: 44, height: 18))
+        }
+        if whatsAppCallActive {
+            extraTargets.append(NSRect(x: bounds.maxX - 110, y: bounds.midY - 9, width: 48, height: 18))
+            extraTargets.append(NSRect(x: bounds.maxX - 56, y: bounds.midY - 9, width: 48, height: 18))
+        }
+        return Self.shouldAcceptPointer(
+            at: point,
+            in: bounds,
+            safeAreaTop: screenSafeAreaTop,
+            extraHitTargets: extraTargets
+        )
+    }
+
     private func notchPath(
         in bounds: NSRect,
         cornerRadius: CGFloat = 18
@@ -1427,21 +1467,16 @@ final class NotchView: NSView {
     }
 
     private func drawCenteredNotificationText(_ text: String, in rect: NSRect, size: CGFloat, weight: NSFont.Weight, color: NSColor) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.lineBreakMode = .byTruncatingTail
         let attributed = NSAttributedString(string: text, attributes: [
             .font: NSFont.systemFont(ofSize: size, weight: weight),
-            .foregroundColor: color,
-            .paragraphStyle: paragraph
+            .foregroundColor: color
         ])
         let textSize = attributed.size()
-        attributed.draw(in: NSRect(
-            x: rect.minX,
-            y: rect.midY - textSize.height / 2,
-            width: rect.width,
-            height: max(textSize.height, rect.height)
-        ))
+        attributed.draw(at: Self.centeredTextOrigin(textSize, in: rect))
+    }
+
+    static func centeredTextOrigin(_ textSize: NSSize, in rect: NSRect) -> NSPoint {
+        NSPoint(x: rect.midX - textSize.width / 2, y: rect.midY - textSize.height / 2)
     }
 
     private func drawStartupLogo(in bounds: NSRect) {
@@ -2458,9 +2493,13 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         }
         systemStateObservers.append(screenChangeObserver)
         displaySyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.syncMirroredNotches(animated: false) }
+            Task { @MainActor in
+                self?.syncMirroredNotches(animated: false)
+                self?.updateNotchPointerAcceptance()
+            }
         }
         if let displaySyncTimer { RunLoop.main.add(displaySyncTimer, forMode: .common) }
+        updateNotchPointerAcceptance()
 
         panel.orderFrontRegardless()
 
@@ -2585,6 +2624,21 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 mirror.panel.setFrame(frame, display: true)
             }
+        }
+    }
+
+    private func updateNotchPointerAcceptance() {
+        let developerPanelIsInteractive = developerMode.presentation != .closed
+        let cursorLocation = NSEvent.mouseLocation
+        if let panel, let notch {
+            let shouldIgnore = !developerPanelIsInteractive
+                && !notch.shouldAcceptPointer(at: notch.convert(panel.convertPoint(fromScreen: cursorLocation), from: nil))
+            if panel.ignoresMouseEvents != shouldIgnore { panel.ignoresMouseEvents = shouldIgnore }
+        }
+        for mirror in mirroredNotches.values {
+            let shouldIgnore = !developerPanelIsInteractive
+                && !mirror.view.shouldAcceptPointer(at: mirror.view.convert(mirror.panel.convertPoint(fromScreen: cursorLocation), from: nil))
+            if mirror.panel.ignoresMouseEvents != shouldIgnore { mirror.panel.ignoresMouseEvents = shouldIgnore }
         }
     }
 

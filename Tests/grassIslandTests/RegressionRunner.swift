@@ -174,6 +174,7 @@ struct GrassIslandRegressionRunner {
                 InboxMessage(id: "2", service: "WhatsApp", account: "WhatsApp Web", sender: "Lin", senderEmail: "", subject: "Two", preview: "Hi", receivedAt: Date(), fingerprint: "w1", sourceURL: "https://web.whatsapp.com", isRead: false)
             ]
             let contents = InboxNotifications.bundleContents(for: messages)
+            let requests = InboxNotifications.bundleRequests(for: messages)
             let largeBatch = (0..<100).map { index in
                 InboxMessage(id: "\(index)", service: "Gmail", account: "me@example.com", sender: "Sender \(index)", senderEmail: "sender@example.org", subject: "Subject \(index)", preview: "Body \(index)", receivedAt: Date(), fingerprint: "g\(index)", sourceURL: "https://mail.google.com", isRead: false)
             }
@@ -183,7 +184,12 @@ struct GrassIslandRegressionRunner {
                 && contents[1].title == "WhatsApp · Lin"
                 && contents[1].body == "Hi"
                 && contents.allSatisfy { $0.threadIdentifier.hasPrefix("inbox-bundle-") }
+                && requests.count == 2
+                && requests[0].content.title == contents[0].title
+                && requests[0].content.subtitle == contents[0].subtitle
+                && requests[0].content.body.contains("ada@example.org")
                 && InboxNotifications.bundleContents(for: largeBatch).count == InboxNotifications.maximumBundleNotifications
+                && InboxNotifications.bundleRequests(for: largeBatch).count == InboxNotifications.maximumBundleNotifications
         }
 
         run("notch idle height follows display safe-area depth and clear-all target fits", failures: &failures) {
@@ -251,6 +257,31 @@ struct GrassIslandRegressionRunner {
             return NotchView.shouldReceivePointer(at: NSPoint(x: 100, y: 20), in: bounds)
                 && !NotchView.shouldReceivePointer(at: NSPoint(x: 100, y: 50), in: bounds)
                 && !NotchView.shouldReceivePointer(at: NSPoint(x: 230, y: 20), in: bounds)
+        }
+
+        run("expanded notch passes pointer input through outside its controls", failures: &failures) {
+            let bounds = NSRect(x: 0, y: 0, width: 370, height: 112)
+            let clear = NotchView.inboxClearAllRect(in: bounds, visibleHeight: 75)
+            let physicalNotchPoint = NSPoint(x: bounds.midX, y: 94)
+            let tabBelowNotchPoint = NSPoint(x: 30, y: 58)
+            let buttonPoint = NSPoint(x: clear.midX, y: clear.midY)
+            return NotchView.shouldAcceptPointer(
+                at: physicalNotchPoint, in: bounds, safeAreaTop: 37
+            )
+                && !NotchView.shouldAcceptPointer(
+                    at: tabBelowNotchPoint, in: bounds, safeAreaTop: 37, extraHitTargets: [clear]
+                )
+                && NotchView.shouldAcceptPointer(
+                    at: buttonPoint, in: bounds, safeAreaTop: 37, extraHitTargets: [clear]
+                )
+        }
+
+        run("clear-all text origin is centered in its button", failures: &failures) {
+            let button = NSRect(x: 292, y: 50, width: 64, height: 19)
+            let textSize = NSSize(width: 34, height: 11)
+            let origin = NotchView.centeredTextOrigin(textSize, in: button)
+            return abs((origin.x + textSize.width / 2) - button.midX) < 0.001
+                && abs((origin.y + textSize.height / 2) - button.midY) < 0.001
         }
 
         run("app bundle provides a real icon for Notification Center", failures: &failures) {
