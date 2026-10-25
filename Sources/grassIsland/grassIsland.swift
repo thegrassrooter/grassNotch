@@ -133,7 +133,7 @@ struct CaptureActivityState: Equatable, Sendable {
 enum SystemCaptureActivity {
     static func currentState() -> CaptureActivityState {
         let cameras = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.builtInWideAngleCamera, .external],
+            deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera, .deskViewCamera],
             mediaType: .video,
             position: .unspecified
         ).devices
@@ -182,6 +182,47 @@ enum SystemCaptureActivity {
            let image = NSImage(contentsOf: packaged) { return image }
 #endif
         return nil
+    }
+}
+
+/// Google Meet keeps the system microphone capture stream active while its
+/// in-call mute is on. macOS only reports that a process is capturing audio,
+/// so read Meet's public accessibility labels through the same Chrome
+/// automation path already used for YouTube. Other apps continue to use the
+/// system-wide Core Audio capture signal above.
+enum ChromeMeetingCapture {
+    struct State: Equatable, Sendable {
+        var cameraInUse: Bool
+        var microphoneInUse: Bool
+    }
+
+    static func parse(_ output: String?) -> State? {
+        guard let output else { return nil }
+        let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "|")
+        guard parts.count == 3, parts[0] == "GRASS_MEET" else { return nil }
+        return State(cameraInUse: parts[1] == "1", microphoneInUse: parts[2] == "1")
+    }
+
+    @MainActor
+    static func fetch(completion: @MainActor @Sendable @escaping (State?) -> Void) {
+        let script = #"""
+        tell application "Google Chrome"
+            if not running or (count of windows) is 0 then return "NO_MEET"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if URL of t contains "meet.google.com/" then
+                        set captureState to execute t javascript "(() => { const labels = Array.from(document.querySelectorAll('[aria-label]')).map(x => (x.getAttribute('aria-label') || '').toLowerCase()); const mic = labels.find(x => (x.includes('microphone') || x.includes('mic')) && (x.includes('turn on') || x.includes('turn off') || x.includes('mute') || x.includes('unmute'))); const camera = labels.find(x => (x.includes('camera') || x.includes('video')) && (x.includes('turn on') || x.includes('turn off') || x.includes('mute') || x.includes('unmute'))); if (!mic || !camera) return 'NO_MEETING_CONTROLS'; const isOn = x => !(x.includes('turn on') || x.includes('unmute')); return ['GRASS_MEET', isOn(camera) ? '1' : '0', isOn(mic) ? '1' : '0'].join('|'); })()"
+                        return captureState
+                    end if
+                end repeat
+            end repeat
+            return "NO_MEET"
+        end tell
+        """#
+
+        SystemVolume.runAppleScriptAsync(script, timeoutInterval: 1.0) { output in
+            completion(parse(output))
+        }
     }
 }
 
@@ -2056,10 +2097,15 @@ final class NotchView: NSView {
         }
 
         let title = mediaTitle.isEmpty ? "YouTube video" : mediaTitle
+        // Keep simultaneous camera and microphone marks clear of the title
+        // instead of drawing them over the last line of text.
+        let indicatorReserve = captureActivity.hasActivity
+            ? CGFloat(captureActivity.activeCount) * 28
+            : 0
         NSAttributedString(string: title, attributes: [
             .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
             .foregroundColor: NSColor.white
-        ]).draw(with: NSRect(x: 94, y: height - 79, width: width - 116, height: 42),
+        ]).draw(with: NSRect(x: 94, y: height - 79, width: max(80, width - 116 - indicatorReserve), height: 42),
                 options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
         NSAttributedString(string: "YouTube · Now playing", attributes: [
             .font: NSFont.systemFont(ofSize: 12, weight: .regular),
@@ -2140,24 +2186,40 @@ final class NotchView: NSView {
         backwards ? 1 : -1
     }
 
+    static func expandedCaptureIndicatorRects(
+        in bounds: NSRect,
+        safeAreaTop: CGFloat,
+        cameraInUse: Bool,
+        microphoneInUse: Bool
+    ) -> [(camera: Bool, rect: NSRect)] {
+        let size: CGFloat = 16
+        let centerY = max(8, bounds.height - safeAreaTop - size - 2) + size / 2
+        var centerX = bounds.maxX - 20
+        var placements: [(camera: Bool, rect: NSRect)] = []
+        if microphoneInUse {
+            placements.append((false, NSRect(x: centerX - 6, y: centerY - 8, width: 12, height: 16)))
+            centerX -= 28
+        }
+        if cameraInUse {
+            placements.append((true, NSRect(x: centerX - 9, y: centerY - 7.5, width: 18, height: 15)))
+        }
+        return placements
+    }
+
     private func drawCaptureIndicators(in bounds: NSRect, expandedMedia: Bool) {
         var icons: [(camera: Bool, rect: NSRect)] = []
-        let size: CGFloat = 16
         func iconRect(camera: Bool, centerX: CGFloat, centerY: CGFloat) -> NSRect {
             let iconSize = camera ? NSSize(width: 18, height: 15) : NSSize(width: 12, height: 16)
             return NSRect(x: centerX - iconSize.width / 2, y: centerY - iconSize.height / 2,
                           width: iconSize.width, height: iconSize.height)
         }
         if expandedMedia {
-            let y = max(8, bounds.height - screenSafeAreaTop - size - 2)
-            var x = bounds.maxX - 18 - size / 2
-            if captureActivity.microphoneInUse {
-                icons.append((false, iconRect(camera: false, centerX: x, centerY: y + size / 2)))
-                x -= 22
-            }
-            if captureActivity.cameraInUse {
-                icons.append((true, iconRect(camera: true, centerX: x, centerY: y + size / 2)))
-            }
+            icons = Self.expandedCaptureIndicatorRects(
+                in: bounds,
+                safeAreaTop: screenSafeAreaTop,
+                cameraInUse: captureActivity.cameraInUse,
+                microphoneInUse: captureActivity.microphoneInUse
+            )
         } else if mediaPlaying {
             var x: CGFloat = 22
             if captureActivity.cameraInUse {
@@ -3297,7 +3359,21 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         captureActivityCheckInProgress = true
         Task.detached(priority: .utility) { [weak self] in
             let state = SystemCaptureActivity.currentState()
-            await self?.applyCaptureActivity(state)
+            await self?.resolveCaptureActivity(systemState: state)
+        }
+    }
+
+    @MainActor
+    private func resolveCaptureActivity(systemState: CaptureActivityState) {
+        ChromeMeetingCapture.fetch { [weak self] meetingState in
+            guard let self else { return }
+            let effectiveState = meetingState.map {
+                CaptureActivityState(
+                    cameraInUse: $0.cameraInUse,
+                    microphoneInUse: $0.microphoneInUse
+                )
+            } ?? systemState
+            self.applyCaptureActivity(effectiveState)
         }
     }
 

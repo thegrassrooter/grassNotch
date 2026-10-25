@@ -268,6 +268,43 @@ struct GrassIslandRegressionRunner {
                 && both.activeCount == 2
         }
 
+        run("expanded YouTube controls reserve separate visible space for both capture icons", failures: &failures) {
+            let bounds = NSRect(x: 0, y: 0, width: 360, height: 218)
+            let placements = NotchView.expandedCaptureIndicatorRects(
+                in: bounds,
+                safeAreaTop: 42,
+                cameraInUse: true,
+                microphoneInUse: true
+            )
+            guard placements.count == 2,
+                  let camera = placements.first(where: \.camera)?.rect,
+                  let microphone = placements.first(where: { !$0.camera })?.rect else { return false }
+            return bounds.contains(camera)
+                && bounds.contains(microphone)
+                && !camera.intersects(microphone)
+                && camera.maxX < microphone.minX
+        }
+
+        run("Google Meet mute and camera-off labels suppress their capture indicators", failures: &failures) {
+            let unmuted = ChromeMeetingCapture.parse("GRASS_MEET|1|1")
+            let muted = ChromeMeetingCapture.parse("GRASS_MEET|1|0")
+            let cameraOff = ChromeMeetingCapture.parse("GRASS_MEET|0|1")
+            return unmuted?.cameraInUse == true
+                && unmuted?.microphoneInUse == true
+                && muted?.cameraInUse == true
+                && muted?.microphoneInUse == false
+                && cameraOff?.cameraInUse == false
+                && cameraOff?.microphoneInUse == true
+                && ChromeMeetingCapture.parse("NO_MEET") == nil
+        }
+
+        run("expanded YouTube control panel stays attached to and centered on the top edge", failures: &failures) {
+            let screen = NSRect(x: 0, y: 0, width: 1470, height: 956)
+            let frame = NotchView.notchFrame(in: screen, width: 360, height: 218)
+            return abs(frame.maxY - screen.maxY) < 0.5
+                && abs(frame.midX - screen.midX) < 0.5
+        }
+
         run("YouTube skip glyph direction matches its seek action", failures: &failures) {
             NotchView.mediaSeekArrowDirection(backwards: true) > 0
                 && NotchView.mediaSeekArrowDirection(backwards: false) < 0
