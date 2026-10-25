@@ -27,12 +27,11 @@ independently installed Swift toolchain with a different Apple SDK.
    ```
 
    To run the SwiftPM executable directly, use `./scripts/swift.sh run`. This
-   selects Apple's Xcode-default toolchain explicitly, avoiding a separately
-   selected toolchain that may not match the active SDK. If you run `swift run`
-   yourself, confirm `swift --version` and `xcode-select -p` refer to a matching
-   Apple toolchain and SDK. Xcode 26 builds can also work around explicit-module
-   scanner errors by setting `SWIFT_ENABLE_EXPLICIT_MODULES=NO` for the affected
-   target, as documented in Apple's Xcode release notes.
+   selects Apple's Xcode-default toolchain explicitly and SwiftPM's native build
+   engine, avoiding a separately selected compiler and Xcode's explicit-module
+   scanner. If you run `swift run` yourself, use Apple's matching Swift and SDK;
+   Xcode-based builds can work around explicit-module scanner errors with
+   `SWIFT_ENABLE_EXPLICIT_MODULES=NO` for the affected target.
 
 3. Launch the app:
 
