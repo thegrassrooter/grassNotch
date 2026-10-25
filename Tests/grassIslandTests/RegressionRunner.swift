@@ -252,6 +252,34 @@ struct GrassIslandRegressionRunner {
                 && back.maxX < play.minX && play.maxX < forward.minX
         }
 
+        run("camera and microphone states widen only the idle or compact media notch", failures: &failures) {
+            let idle = CaptureActivityState()
+            let camera = CaptureActivityState(cameraInUse: true, microphoneInUse: false)
+            let microphone = CaptureActivityState(cameraInUse: false, microphoneInUse: true)
+            let both = CaptureActivityState(cameraInUse: true, microphoneInUse: true)
+            return CaptureActivityState.idleWidth(for: idle) == 210
+                && CaptureActivityState.idleWidth(for: camera) == 260
+                && CaptureActivityState.idleWidth(for: microphone) == 260
+                && CaptureActivityState.idleWidth(for: both) == 300
+                && CaptureActivityState.compactMediaWidth(for: idle) == 360
+                && CaptureActivityState.compactMediaWidth(for: camera) == 392
+                && CaptureActivityState.compactMediaWidth(for: microphone) == 392
+                && CaptureActivityState.compactMediaWidth(for: both) == 424
+                && both.activeCount == 2
+        }
+
+        run("YouTube skip glyph direction matches its seek action", failures: &failures) {
+            NotchView.mediaSeekArrowDirection(backwards: true) > 0
+                && NotchView.mediaSeekArrowDirection(backwards: false) < 0
+        }
+
+        run("provided camera and microphone marks are packaged as image assets", failures: &failures) {
+            let assets = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/grassIsland/Assets", isDirectory: true)
+            return NSImage(contentsOf: assets.appendingPathComponent("camera-activity.png")) != nil
+                && NSImage(contentsOf: assets.appendingPathComponent("microphone-activity.png")) != nil
+        }
+
         run("notch input surface is limited to its visible bounds", failures: &failures) {
             let bounds = NSRect(x: 0, y: 0, width: 210, height: 34)
             return NotchView.shouldReceivePointer(at: NSPoint(x: 100, y: 20), in: bounds)

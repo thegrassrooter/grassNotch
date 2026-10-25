@@ -1,5 +1,6 @@
 
 import AppKit
+import AVFoundation
 import CoreAudio
 import Darwin
 import QuartzCore
@@ -110,6 +111,77 @@ enum SystemBluetooth {
     static func didPowerStateChange(previous: Bool?, current: Bool) -> Bool {
         guard let previous else { return false }
         return previous != current
+    }
+}
+
+struct CaptureActivityState: Equatable, Sendable {
+    var cameraInUse = false
+    var microphoneInUse = false
+
+    var activeCount: Int { (cameraInUse ? 1 : 0) + (microphoneInUse ? 1 : 0) }
+    var hasActivity: Bool { activeCount > 0 }
+
+    static func idleWidth(for state: CaptureActivityState, baseWidth: CGFloat = 210) -> CGFloat {
+        state.hasActivity ? (state.activeCount == 1 ? baseWidth + 50 : baseWidth + 90) : baseWidth
+    }
+
+    static func compactMediaWidth(for state: CaptureActivityState, baseWidth: CGFloat = 360) -> CGFloat {
+        baseWidth + CGFloat(state.activeCount) * 32
+    }
+}
+
+enum SystemCaptureActivity {
+    static func currentState() -> CaptureActivityState {
+        let cameras = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .external],
+            mediaType: .video,
+            position: .unspecified
+        ).devices
+        return CaptureActivityState(
+            cameraInUse: cameras.contains(where: \.isInUseByAnotherApplication),
+            microphoneInUse: isAnyProcessCapturingAudioInput()
+        )
+    }
+
+    private static func isAnyProcessCapturingAudioInput() -> Bool {
+        var listAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var listSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &listAddress, 0, nil, &listSize
+        ) == noErr, listSize >= UInt32(MemoryLayout<AudioObjectID>.size) else { return false }
+        var processIDs = [AudioObjectID](repeating: 0, count: Int(listSize) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &listAddress, 0, nil, &listSize, &processIDs
+        ) == noErr else { return false }
+
+        var runningAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyIsRunningInput,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        for processID in processIDs {
+            var isRunningInput: UInt32 = 0
+            var runningSize = UInt32(MemoryLayout<UInt32>.size)
+            if AudioObjectGetPropertyData(
+                processID, &runningAddress, 0, nil, &runningSize, &isRunningInput
+            ) == noErr, isRunningInput != 0 { return true }
+        }
+        return false
+    }
+
+    static func icon(camera: Bool) -> NSImage? {
+        let name = camera ? "camera-activity" : "microphone-activity"
+        if let bundled = Bundle.main.url(forResource: name, withExtension: "png"),
+           let image = NSImage(contentsOf: bundled) { return image }
+#if !GRASS_ISLAND_REGRESSION
+        if let packaged = Bundle.module.url(forResource: name, withExtension: "png", subdirectory: "Assets"),
+           let image = NSImage(contentsOf: packaged) { return image }
+#endif
+        return nil
     }
 }
 
@@ -1010,6 +1082,7 @@ final class NotchView: NSView {
     var currentTimeText = "" { didSet { needsDisplay = true } }
     var batteryPercent = 100 { didSet { needsDisplay = true } }
     var batteryIsCharging = false { didSet { needsDisplay = true } }
+    var captureActivity = CaptureActivityState() { didSet { needsDisplay = true } }
 
     var whatsAppCallActive = false { didSet { needsDisplay = true } }
     var whatsAppInCall = false { didSet { needsDisplay = true } }
@@ -1034,7 +1107,6 @@ final class NotchView: NSView {
     var onClearIncomingMessages: (@MainActor () -> Void)?
     var onMirrorToggleExpanded: (@MainActor () -> Void)?
     var isMirror = false
-    weak var mirrorStateSource: NotchView?
     private var screenSafeAreaTop: CGFloat { window?.screen?.safeAreaInsets.top ?? 0 }
 
     func copyVisualState(from source: NotchView) {
@@ -1067,6 +1139,7 @@ final class NotchView: NSView {
         if currentTimeText != source.currentTimeText { currentTimeText = source.currentTimeText }
         if batteryPercent != source.batteryPercent { batteryPercent = source.batteryPercent }
         if batteryIsCharging != source.batteryIsCharging { batteryIsCharging = source.batteryIsCharging }
+        if captureActivity != source.captureActivity { captureActivity = source.captureActivity }
         if whatsAppCallActive != source.whatsAppCallActive { whatsAppCallActive = source.whatsAppCallActive }
         if whatsAppInCall != source.whatsAppInCall { whatsAppInCall = source.whatsAppInCall }
         if whatsAppCallerName != source.whatsAppCallerName { whatsAppCallerName = source.whatsAppCallerName }
@@ -1190,7 +1263,6 @@ final class NotchView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if isMirror, let mirrorStateSource { copyVisualState(from: mirrorStateSource) }
         let context = NSGraphicsContext.current?.cgContext
         let bounds = self.bounds
 
@@ -1269,6 +1341,7 @@ final class NotchView: NSView {
 
         if startupSplash {
             drawStartupLogo(in: bounds)
+            if captureActivity.hasActivity { drawCaptureIndicators(in: bounds, expandedMedia: false) }
             return
         }
 
@@ -1287,6 +1360,9 @@ final class NotchView: NSView {
         }
 
         drawUnderlyingState(in: bounds)
+        if captureActivity.hasActivity {
+            drawCaptureIndicators(in: bounds, expandedMedia: expanded && mediaPlaying)
+        }
     }
 
     private func drawNoNetworkAlert(in bounds: NSRect) {
@@ -1526,7 +1602,7 @@ final class NotchView: NSView {
         )
         logo.draw(at: origin)
 
-        let subtitle = NSAttributedString(string: "NotchOS 2.2", attributes: [
+        let subtitle = NSAttributedString(string: "NotchOS 2.4", attributes: [
             .font: NSFont.systemFont(ofSize: 10, weight: .medium),
             .foregroundColor: NSColor(white: 0.92, alpha: 1)
         ])
@@ -1855,7 +1931,7 @@ final class NotchView: NSView {
 
     private func drawMedia(in bounds: NSRect) {
         let y = bounds.midY - 6
-        let logo = NSRect(x: 13, y: y - 1, width: 22, height: 15)
+        let logo = NSRect(x: 13 + CGFloat(captureActivity.activeCount) * 24, y: y - 1, width: 22, height: 15)
         NSColor(calibratedRed: 1.0, green: 0.08, blue: 0.08, alpha: 1).setFill()
         NSBezierPath(roundedRect: logo, xRadius: 4, yRadius: 4).fill()
         let triangle = NSBezierPath()
@@ -2024,7 +2100,7 @@ final class NotchView: NSView {
         let centerX = rect.midX
         let centerY = rect.midY
         // Minimal skip glyph with a clear 10-second label, aligned to the same baseline.
-        let direction: CGFloat = backwards ? -1 : 1
+        let direction = Self.mediaSeekArrowDirection(backwards: backwards)
         let symbol = NSBezierPath()
         symbol.lineWidth = 2.3
         symbol.lineCapStyle = .round
@@ -2058,6 +2134,57 @@ final class NotchView: NSView {
 
     static func mediaForwardControlRect(in bounds: NSRect) -> NSRect {
         NSRect(x: bounds.midX + 49, y: 8, width: 42, height: 42)
+    }
+
+    static func mediaSeekArrowDirection(backwards: Bool) -> CGFloat {
+        backwards ? 1 : -1
+    }
+
+    private func drawCaptureIndicators(in bounds: NSRect, expandedMedia: Bool) {
+        var icons: [(camera: Bool, rect: NSRect)] = []
+        let size: CGFloat = 16
+        func iconRect(camera: Bool, centerX: CGFloat, centerY: CGFloat) -> NSRect {
+            let iconSize = camera ? NSSize(width: 18, height: 15) : NSSize(width: 12, height: 16)
+            return NSRect(x: centerX - iconSize.width / 2, y: centerY - iconSize.height / 2,
+                          width: iconSize.width, height: iconSize.height)
+        }
+        if expandedMedia {
+            let y = max(8, bounds.height - screenSafeAreaTop - size - 2)
+            var x = bounds.maxX - 18 - size / 2
+            if captureActivity.microphoneInUse {
+                icons.append((false, iconRect(camera: false, centerX: x, centerY: y + size / 2)))
+                x -= 22
+            }
+            if captureActivity.cameraInUse {
+                icons.append((true, iconRect(camera: true, centerX: x, centerY: y + size / 2)))
+            }
+        } else if mediaPlaying {
+            var x: CGFloat = 22
+            if captureActivity.cameraInUse {
+                icons.append((true, iconRect(camera: true, centerX: x, centerY: bounds.midY)))
+                x += 24
+            }
+            if captureActivity.microphoneInUse {
+                icons.append((false, iconRect(camera: false, centerX: x, centerY: bounds.midY)))
+            }
+        } else if captureActivity.cameraInUse && captureActivity.microphoneInUse {
+            icons.append((true, iconRect(camera: true, centerX: 20, centerY: bounds.midY)))
+            icons.append((false, iconRect(camera: false, centerX: bounds.maxX - 20, centerY: bounds.midY)))
+        } else {
+            icons.append((captureActivity.cameraInUse,
+                          iconRect(camera: captureActivity.cameraInUse,
+                                   centerX: bounds.maxX - 16, centerY: bounds.midY)))
+        }
+
+        for icon in icons {
+            if let image = SystemCaptureActivity.icon(camera: icon.camera) {
+                image.draw(in: icon.rect, from: .zero, operation: .sourceOver, fraction: 1,
+                           respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
+            } else if let symbol = NSImage(systemSymbolName: icon.camera ? "camera.fill" : "mic.fill",
+                                           accessibilityDescription: icon.camera ? "Camera in use" : "Microphone in use") {
+                symbol.withSymbolConfiguration(.init(pointSize: 13, weight: .medium))?.draw(in: icon.rect)
+            }
+        }
     }
 
     // MARK: System Timer
@@ -2287,6 +2414,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var notch: NotchView!
     private var mirroredNotches: [UInt32: MirroredNotchDisplay] = [:]
     private var displaySyncTimer: Timer?
+    private var pointerAcceptanceTimer: Timer?
     private let developerMode = DeveloperModeManager()
     private var developerHost: DeveloperHostingView?
     private var developerSessionObservers: [NSObjectProtocol] = []
@@ -2315,6 +2443,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var lastBatteryPercent: Int?
     private var lastBluetoothPoweredOn: Bool?
     private var lastBluetoothNotificationAt: CFTimeInterval = 0
+    private var captureActivityCheckInProgress = false
     private var focusStatusTimer: Timer?
     private var youtubePollingTimer: Timer?
     private var lastFocusState: Bool?
@@ -2526,15 +2655,19 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         displaySyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.syncMirroredNotches(animated: false)
-                self?.updateNotchPointerAcceptance()
             }
         }
         if let displaySyncTimer { RunLoop.main.add(displaySyncTimer, forMode: .common) }
+        pointerAcceptanceTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.updateNotchPointerAcceptance() }
+        }
+        if let pointerAcceptanceTimer { RunLoop.main.add(pointerAcceptanceTimer, forMode: .common) }
         updateNotchPointerAcceptance()
 
         panel.orderFrontRegardless()
 
         installAppActivationObserver()
+        pollCaptureActivity()
         pollClockAndBattery()
         // Observe YouTube playback during the startup splash so the audio
         // indicator is not delayed until the rest of app polling starts.
@@ -2596,7 +2729,6 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             let mirrorView = NotchView(frame: NSRect(origin: .zero, size: frame.size))
             mirrorView.autoresizingMask = [.width, .height]
             mirrorView.isMirror = true
-            mirrorView.mirrorStateSource = notch
             mirrorView.onDeveloperModeClick = notch.onDeveloperModeClick
             mirrorView.onControlClickLock = notch.onControlClickLock
             mirrorView.onAcceptWhatsAppCall = notch.onAcceptWhatsAppCall
@@ -3072,6 +3204,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Polling
 
     private func startPolling() {
+        pollCaptureActivity()
         installBluetoothPowerObservers()
         startFocusStatusMonitoring()
         networkMonitor.pathUpdateHandler = { [weak self] path in
@@ -3140,18 +3273,40 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        let captureActivityTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pollCaptureActivity() }
+        }
+
         timers = [
             volumeTimer,
             systemTimer,
             clockTimer,
             bluetoothTimer,
             whatsappTimer,
-            gmailTimer
+            gmailTimer,
+            captureActivityTimer
         ]
 
         timers.forEach {
             RunLoop.main.add($0, forMode: .common)
         }
+    }
+
+    private func pollCaptureActivity() {
+        guard !captureActivityCheckInProgress else { return }
+        captureActivityCheckInProgress = true
+        Task.detached(priority: .utility) { [weak self] in
+            let state = SystemCaptureActivity.currentState()
+            await self?.applyCaptureActivity(state)
+        }
+    }
+
+    private func applyCaptureActivity(_ state: CaptureActivityState) {
+        captureActivityCheckInProgress = false
+        guard state != notch.captureActivity else { return }
+        notch.captureActivity = state
+        resizeWindow(animated: true)
+        notch.needsDisplay = true
     }
 
     // MARK: WhatsApp Avatars
@@ -3951,11 +4106,16 @@ private func animateVolumeHUD(to target: CGFloat) {
         } else if notch.expanded && notch.mediaPlaying {
             targetWidth = activeWidth
             targetHeight = 218
+        } else if notch.mediaPlaying {
+            targetWidth = CaptureActivityState.compactMediaWidth(for: notch.captureActivity, baseWidth: activeWidth)
+            targetHeight = idleHeight
         } else if notch.expanded
-                    || notch.mediaPlaying
                     || notch.chargingIndicatorActive
                     || notch.systemTimerActive {
             targetWidth = activeWidth
+            targetHeight = idleHeight
+        } else if notch.captureActivity.hasActivity {
+            targetWidth = CaptureActivityState.idleWidth(for: notch.captureActivity, baseWidth: idleWidth)
             targetHeight = idleHeight
         } else {
             targetWidth = idleWidth
@@ -4086,6 +4246,8 @@ private func animateVolumeHUD(to target: CGFloat) {
         developerMode.lockDeveloperMode(reason: .applicationTerminated)
         displaySyncTimer?.invalidate()
         displaySyncTimer = nil
+        pointerAcceptanceTimer?.invalidate()
+        pointerAcceptanceTimer = nil
         for mirror in mirroredNotches.values { mirror.panel.orderOut(nil) }
         mirroredNotches.removeAll()
         timers.forEach { $0.invalidate() }

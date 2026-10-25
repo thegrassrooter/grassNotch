@@ -2,6 +2,16 @@
 
 grassNotch is a native macOS menu-bar/notch app built with Swift and SwiftUI.
 
+## NotchOS 2.4
+
+This release adds live camera and microphone activity indicators using the
+provided camera and microphone icons. The notch widens sideways when idle, adds
+the indicators beside compact YouTube status, and keeps the YouTube controls at
+their existing size while placing indicators in the header. Mirrored displays
+avoid redundant per-draw state copies, and pointer pass-through checks run
+separately from visual synchronization to reduce external-display overhead.
+YouTube skip arrows now match their back and forward actions.
+
 ## Build and launch the app
 
 Requirements: macOS 15 or later and Swift 6.4 or later from Xcode or Apple's Command Line Tools.
