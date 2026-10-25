@@ -168,6 +168,28 @@ struct GrassIslandRegressionRunner {
                 && content.threadIdentifier.contains("gmail")
         }
 
+        run("message backlog becomes one Notification Center bundle", failures: &failures) {
+            let messages = [
+                InboxMessage(id: "1", service: "Gmail", account: "me@example.com", sender: "Ada", senderEmail: "ada@example.org", subject: "One", preview: "", receivedAt: Date(), fingerprint: "g1", sourceURL: "https://mail.google.com", isRead: false),
+                InboxMessage(id: "2", service: "WhatsApp", account: "WhatsApp Web", sender: "Lin", senderEmail: "", subject: "Two", preview: "Hi", receivedAt: Date(), fingerprint: "w1", sourceURL: "https://web.whatsapp.com", isRead: false)
+            ]
+            let content = InboxNotifications.bundleContent(for: messages)
+            return content.title == "Unread messages"
+                && content.subtitle == "Gmail 1 · WhatsApp 1"
+                && content.body.contains("2 unread messages")
+                && content.threadIdentifier == "inbox-bundle"
+        }
+
+        run("notch idle height follows display safe-area depth and clear-all target fits", failures: &failures) {
+            let bounds = NSRect(x: 0, y: 0, width: 370, height: 112)
+            let clear = NotchView.inboxClearAllRect(in: bounds, visibleHeight: 78)
+            return NotchView.idlePanelHeight(safeAreaTop: 37) == 37
+                && NotchView.idlePanelHeight(safeAreaTop: 44) == 44
+                && NotchView.idlePanelHeight(safeAreaTop: 30) == 34
+                && bounds.contains(clear)
+                && clear.width >= 60 && clear.height >= 18
+        }
+
         run("Gmail and WhatsApp use real bundled brand marks for notch and notification imagery", failures: &failures) {
             let gmailURL = InboxNotifications.brandLogoURL(for: "Gmail")
             let whatsappURL = InboxNotifications.brandLogoURL(for: "WhatsApp")
@@ -268,7 +290,7 @@ struct GrassIslandRegressionRunner {
             print("FAIL: app-switch view draws a larger icon in the left wing without a backing badge")
         }
 
-        print("Regression cases: 21 total, \(21 - failures.count) passed, \(failures.count) failed")
+        print("Regression cases: 25 total, \(25 - failures.count) passed, \(failures.count) failed")
         if !failures.isEmpty {
             for failure in failures { print("FAILED: \(failure)") }
             exit(EXIT_FAILURE)

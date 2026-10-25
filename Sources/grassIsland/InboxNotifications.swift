@@ -122,6 +122,37 @@ enum InboxNotifications {
         }
     }
 
+    /// Posts one Notification Center entry summarizing a backlog or a group
+    /// the user explicitly cleared from the notch.
+    static func postBundle(_ messages: [InboxMessage]) {
+        guard hasApplicationBundle, !messages.isEmpty else { return }
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(
+                identifier: "grassIsland.inbox.bundle.\(UUID().uuidString)",
+                content: bundleContent(for: messages),
+                trigger: nil
+            )
+        ) { error in
+            if let error { NSLog("[InboxNotifications] failed to post message bundle: %@", error.localizedDescription) }
+        }
+    }
+
+    static func bundleContent(for messages: [InboxMessage]) -> UNMutableNotificationContent {
+        let gmailCount = messages.filter { $0.service == "Gmail" }.count
+        let whatsAppCount = messages.count - gmailCount
+        let summary = [
+            gmailCount > 0 ? "Gmail \(gmailCount)" : nil,
+            whatsAppCount > 0 ? "WhatsApp \(whatsAppCount)" : nil
+        ].compactMap { $0 }.joined(separator: " · ")
+        let content = UNMutableNotificationContent()
+        content.title = "Unread messages"
+        content.subtitle = summary
+        content.body = "\(messages.count) unread message\(messages.count == 1 ? "" : "s") moved to Notification Center."
+        content.threadIdentifier = "inbox-bundle"
+        content.userInfo = ["sourceURL": "https://mail.google.com/mail/u/0/#inbox"]
+        return content
+    }
+
     @MainActor
     static func runSmokeTest() async -> (Bool, String) {
         guard hasApplicationBundle else {

@@ -534,8 +534,8 @@ final class InboxStore {
 
     func claimNotification(for fingerprint: String) -> Bool {
         guard !fingerprint.isEmpty, notifiedFingerprints.insert(fingerprint).inserted else { return false }
-        if notifiedFingerprints.count > 2000 {
-            notifiedFingerprints = Set(notifiedFingerprints.suffix(1500))
+        if notifiedFingerprints.count > 20_000 {
+            notifiedFingerprints = Set(notifiedFingerprints.suffix(15_000))
         }
         UserDefaults.standard.set(Array(notifiedFingerprints), forKey: notifiedKey)
         return true
@@ -971,6 +971,7 @@ final class NotchView: NSView, NSDraggingSource {
     var previousCurrentAppIcon: NSImage? { didSet { needsDisplay = true } }
     var currentAppIconTransitionProgress: CGFloat = 1 { didSet { needsDisplay = true } }
     var incomingNotification: InboxMessage? { didSet { needsDisplay = true } }
+    var incomingNotificationAlpha: CGFloat = 1 { didSet { needsDisplay = true } }
     var fileDropURL: URL? { didSet { needsDisplay = true } }
     var fileDropThumbnail: NSImage? { didSet { needsDisplay = true } }
     var fileDropHovering = false { didSet { needsDisplay = true } }
@@ -1011,6 +1012,7 @@ final class NotchView: NSView, NSDraggingSource {
     var onFileDropHoverChanged: (@MainActor (Bool) -> Void)?
     var onFileAction: (@MainActor (String, URL) -> Void)?
     var onFileDragEnded: (@MainActor () -> Void)?
+    var onClearIncomingMessages: (@MainActor () -> Void)?
     private var fileDragCandidate: URL?
     private var fileDragStartPoint: NSPoint?
     private var isDraggingFileOut = false
@@ -1149,7 +1151,10 @@ final class NotchView: NSView, NSDraggingSource {
         }
 
         if let incomingNotification {
+            context?.saveGState()
+            context?.setAlpha(incomingNotificationAlpha)
             drawInboxNotification(incomingNotification, in: bounds)
+            context?.restoreGState()
             return
         }
 
@@ -1421,7 +1426,7 @@ final class NotchView: NSView, NSDraggingSource {
         }
 
         let left: CGFloat = 60
-        let width = max(80, bounds.width - left - 18)
+        let width = max(80, bounds.width - left - 92)
         let header = isGmail ? "GMAIL  ·  TO  \(message.account)" : "WHATSAPP"
         drawNotificationText(header, in: NSRect(x: left, y: visibleHeight - 17, width: width, height: 13), size: 9, weight: .semibold, color: NSColor(white: 0.68, alpha: 1))
 
@@ -1436,6 +1441,24 @@ final class NotchView: NSView, NSDraggingSource {
         if isGmail, !message.preview.isEmpty {
             drawNotificationText(message.preview, in: NSRect(x: left, y: 2, width: width, height: 12), size: 9, weight: .regular, color: NSColor(white: 0.62, alpha: 1))
         }
+
+        let clearRect = Self.inboxClearAllRect(in: bounds)
+        NSColor(white: 0.16, alpha: 1).setFill()
+        NSBezierPath(roundedRect: clearRect, xRadius: 8, yRadius: 8).fill()
+        drawNotificationText("Clear all", in: clearRect.insetBy(dx: 3, dy: 2), size: 9, weight: .semibold, color: NSColor(white: 0.82, alpha: 1))
+    }
+
+    static func inboxClearAllRect(in bounds: NSRect) -> NSRect {
+        let visibleHeight = max(0, bounds.height - (NSScreen.notchScreen?.safeAreaInsets.top ?? 34))
+        return inboxClearAllRect(in: bounds, visibleHeight: visibleHeight)
+    }
+
+    static func inboxClearAllRect(in bounds: NSRect, visibleHeight: CGFloat) -> NSRect {
+        NSRect(x: bounds.maxX - 78, y: visibleHeight - 25, width: 64, height: 19)
+    }
+
+    static func idlePanelHeight(safeAreaTop: CGFloat) -> CGFloat {
+        max(34, safeAreaTop)
     }
 
     private func drawNotificationText(_ text: String, in rect: NSRect, size: CGFloat, weight: NSFont.Weight, color: NSColor) {
@@ -2124,6 +2147,12 @@ final class NotchView: NSView, NSDraggingSource {
             return
         }
 
+        if incomingNotification != nil,
+           Self.inboxClearAllRect(in: bounds).contains(loc) {
+            onClearIncomingMessages?()
+            return
+        }
+
         if whatsAppInCall {
             let mute = NSRect(
                 x: bounds.maxX - 104,
@@ -2338,7 +2367,12 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var lastDeveloperPermissionStates: [String: String] = [:]
     private var incomingNotificationQueue: [InboxMessage] = []
     private var pendingNotificationFingerprints = Set<String>()
+    private var deferredInboxMessages: [String: InboxMessage] = [:]
+    private var inboxSessionInactive = false
+    private var deferGmailScanToNotificationCenter = true
+    private var deferWhatsAppScanToNotificationCenter = true
     private var incomingNotificationTimer: Timer?
+    private var incomingNotificationTransitionTimer: Timer?
     private var gmailCheckInProgress = false
     private var didInitialGmailSync = false
     private var volumeAnimationTimer: Timer?
@@ -2370,8 +2404,14 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     }
     private let cardWidth: CGFloat = 246
     private let multiMessageBaseWidth: CGFloat = 258
+    private let maximumMessagesInNotchQueue = 20
 
-    private let idleHeight: CGFloat = 34
+    // NSScreen reports the actual cutout's top safe-area depth. MacBook Pro
+    // and Air displays differ, so use their live display geometry rather than
+    // assuming a single model's notch height.
+    private var idleHeight: CGFloat {
+        NotchView.idlePanelHeight(safeAreaTop: NSScreen.notchScreen?.safeAreaInsets.top ?? 34)
+    }
     private let noNetworkAlertHeight: CGFloat = 104
     private let singleMessageHeight: CGFloat = 100
     private let messageRowHeight: CGFloat = 38
@@ -2495,6 +2535,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         notch.onFileDrop = { [weak self] url in self?.showFilePreview(url) }
         notch.onFileAction = { [weak self] action, url in self?.performFileAction(action, for: url) }
         notch.onFileDragEnded = { [weak self] in self?.clearFilePreview() }
+        notch.onClearIncomingMessages = { [weak self] in self?.clearIncomingMessagesToNotificationCenter() }
 
         notch.onControlClickLock = { [weak self] in
             self?.lockScreen()
@@ -2622,14 +2663,20 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.developerMode.lockDeveloperMode(reason: .screenLocked) }
+            Task { @MainActor in
+                self?.developerMode.lockDeveloperMode(reason: .screenLocked)
+                self?.suspendInboxNotificationsForSession()
+            }
         }
         let sleepObserver = center.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.developerMode.lockDeveloperMode(reason: .systemSleep) }
+            Task { @MainActor in
+                self?.developerMode.lockDeveloperMode(reason: .systemSleep)
+                self?.suspendInboxNotificationsForSession()
+            }
         }
         let wakeObserver = center.addObserver(
             forName: NSWorkspace.didWakeNotification,
@@ -2654,6 +2701,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 // Becoming active never restores a previously authenticated session.
                 self.developerMode.lockDeveloperMode(reason: .sessionExpired)
+                self.resumeInboxNotificationsForSession()
             }
         }
         developerSessionObservers = [sessionObserver, sleepObserver, wakeObserver, powerOffObserver, activeObserver]
@@ -3109,13 +3157,9 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
                     whilePageIsActive: state.isActivePage
                 )
             }
-            guard !messagesToNotify.isEmpty,
-                  !self.notch.whatsAppCallActive,
-                  !self.notch.whatsAppInCall else { return }
-
-            for item in messagesToNotify {
+            let inboxMessages = messagesToNotify.map { item in
                 let preview = item.preview.trimmingCharacters(in: .whitespacesAndNewlines)
-                let message = InboxMessage(
+                return InboxMessage(
                     id: UUID().uuidString,
                     service: "WhatsApp",
                     account: "WhatsApp Web",
@@ -3128,8 +3172,33 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
                     sourceURL: "https://web.whatsapp.com/",
                     isRead: false
                 )
-                self.enqueueNotification(message)
             }
+            if self.inboxSessionInactive {
+                self.deferInboxMessages(inboxMessages)
+                return
+            }
+            if self.deferWhatsAppScanToNotificationCenter {
+                guard !state.isActivePage else { return }
+                self.deferWhatsAppScanToNotificationCenter = false
+                self.deliverInboxBundle(inboxMessages)
+                return
+            }
+            guard !inboxMessages.isEmpty,
+                  !self.notch.whatsAppCallActive,
+                  !self.notch.whatsAppInCall else { return }
+            if self.whatsAppPageIsActive {
+                return
+            }
+
+            let freshMessages = inboxMessages.filter {
+                !self.pendingNotificationFingerprints.contains($0.fingerprint)
+                    && !InboxStore.shared.hasNotificationBeenDelivered(for: $0.fingerprint)
+            }
+            if freshMessages.count > self.maximumMessagesInNotchQueue {
+                self.deliverInboxBundle(freshMessages)
+                return
+            }
+            for message in freshMessages { self.enqueueNotification(message) }
             if !state.isActivePage, !messagesToNotify.isEmpty {
                 self.fetchAvatarImages(for: Array(messagesToNotify.prefix(4)))
             }
@@ -3158,7 +3227,110 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Notification queue and Gmail
 
+    private func deferInboxMessages(_ messages: [InboxMessage]) {
+        for message in messages where !message.fingerprint.isEmpty {
+            deferredInboxMessages[message.fingerprint] = message
+            _ = InboxStore.shared.add(message)
+        }
+    }
+
+    private func deliverInboxBundle(_ messages: [InboxMessage]) {
+        var newlyDelivered: [InboxMessage] = []
+        for message in messages where !message.fingerprint.isEmpty {
+            _ = InboxStore.shared.add(message)
+            if InboxStore.shared.claimNotification(for: message.fingerprint) {
+                newlyDelivered.append(message)
+            }
+        }
+        InboxNotifications.postBundle(newlyDelivered)
+    }
+
+    private func collectPendingInboxMessages() -> [InboxMessage] {
+        var messages = Array(deferredInboxMessages.values)
+        messages.append(contentsOf: incomingNotificationQueue)
+        if let current = notch.incomingNotification { messages.append(current) }
+        var seen = Set<String>()
+        return messages.filter { !$0.fingerprint.isEmpty && seen.insert($0.fingerprint).inserted }
+    }
+
+    private func suspendInboxNotificationsForSession() {
+        inboxSessionInactive = true
+        deferGmailScanToNotificationCenter = true
+        deferWhatsAppScanToNotificationCenter = true
+        let pending = collectPendingInboxMessages()
+        incomingNotificationTimer?.invalidate()
+        incomingNotificationTimer = nil
+        incomingNotificationTransitionTimer?.invalidate()
+        incomingNotificationTransitionTimer = nil
+        incomingNotificationQueue.removeAll()
+        deferredInboxMessages = Dictionary(uniqueKeysWithValues: pending.map { ($0.fingerprint, $0) })
+        pendingNotificationFingerprints.removeAll()
+        notch.incomingNotification = nil
+        notch.incomingNotificationAlpha = 1
+        resizeWindow(animated: true)
+    }
+
+    private func resumeInboxNotificationsForSession() {
+        inboxSessionInactive = false
+        let pending = collectPendingInboxMessages()
+        incomingNotificationQueue.removeAll()
+        deferredInboxMessages.removeAll()
+        notch.incomingNotification = nil
+        notch.incomingNotificationAlpha = 1
+        deliverInboxBundle(pending)
+        resizeWindow(animated: true)
+    }
+
+    private func clearIncomingMessagesToNotificationCenter() {
+        let pending = collectPendingInboxMessages()
+        incomingNotificationTimer?.invalidate()
+        incomingNotificationTimer = nil
+        incomingNotificationTransitionTimer?.invalidate()
+        incomingNotificationTransitionTimer = nil
+        incomingNotificationQueue.removeAll()
+        deferredInboxMessages.removeAll()
+        pendingNotificationFingerprints.removeAll()
+        notch.incomingNotification = nil
+        notch.incomingNotificationAlpha = 1
+        deliverInboxBundle(pending)
+        resizeWindow(animated: true)
+    }
+
+    private func animateIncomingNotificationAlpha(
+        to target: CGFloat,
+        duration: TimeInterval,
+        completion: (@MainActor @Sendable () -> Void)? = nil
+    ) {
+        incomingNotificationTransitionTimer?.invalidate()
+        let start = CACurrentMediaTime()
+        let from = notch.incomingNotificationAlpha
+        guard duration > 0 else {
+            notch.incomingNotificationAlpha = target
+            completion?()
+            return
+        }
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let progress = min(1, max(0, (CACurrentMediaTime() - start) / duration))
+                let eased = progress * progress * (3 - 2 * progress)
+                self.notch.incomingNotificationAlpha = from + (target - from) * CGFloat(eased)
+                if progress >= 1 {
+                    self.incomingNotificationTransitionTimer?.invalidate()
+                    self.incomingNotificationTransitionTimer = nil
+                    completion?()
+                }
+            }
+        }
+        incomingNotificationTransitionTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
     private func enqueueNotification(_ message: InboxMessage) {
+        if inboxSessionInactive {
+            deferInboxMessages([message])
+            return
+        }
         guard !message.fingerprint.isEmpty,
               !pendingNotificationFingerprints.contains(message.fingerprint),
               !InboxStore.shared.hasNotificationBeenDelivered(for: message.fingerprint) else { return }
@@ -3178,29 +3350,28 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
         let message = incomingNotificationQueue.removeFirst()
         cancelAppSwitchAnimation()
+        notch.incomingNotificationAlpha = 0
         notch.incomingNotification = message
         resizeWindow(animated: true)
+        animateIncomingNotificationAlpha(to: 1, duration: 0.22)
 
         incomingNotificationTimer?.invalidate()
         incomingNotificationTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                if message.service == "WhatsApp", self.whatsAppPageIsActive {
-                    self.whatsAppNotificationFilter.suppressFingerprints([message.fingerprint])
-                    self.notch.incomingNotification = nil
-                    self.pendingNotificationFingerprints.remove(message.fingerprint)
-                    self.incomingNotificationTimer = nil
-                    self.resizeWindow(animated: true)
-                    return
-                }
-                if InboxStore.shared.claimNotification(for: message.fingerprint) {
-                    InboxNotifications.post(message)
-                }
-                self.pendingNotificationFingerprints.remove(message.fingerprint)
-                self.notch.incomingNotification = nil
-                self.resizeWindow(animated: true)
                 self.incomingNotificationTimer = nil
-                self.showNextIncomingNotificationIfNeeded()
+                self.animateIncomingNotificationAlpha(to: 0, duration: 0.16) {
+                    if message.service == "WhatsApp", self.whatsAppPageIsActive {
+                        self.whatsAppNotificationFilter.suppressFingerprints([message.fingerprint])
+                    } else if InboxStore.shared.claimNotification(for: message.fingerprint) {
+                        InboxNotifications.post(message)
+                    }
+                    self.pendingNotificationFingerprints.remove(message.fingerprint)
+                    self.notch.incomingNotification = nil
+                    self.notch.incomingNotificationAlpha = 1
+                    self.resizeWindow(animated: true)
+                    self.showNextIncomingNotificationIfNeeded()
+                }
             }
         }
         if let incomingNotificationTimer {
@@ -3222,17 +3393,31 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
                 scannedAccounts: scan.scannedInboxAccounts,
                 unreadFingerprints: unreadFingerprints
             )
-            if !self.didInitialGmailSync {
-                // Only establish the baseline after Gmail's Inbox has rendered.
-                // Surface currently unread mail once so the first run isn't silent.
-                guard !scan.scannedInboxAccounts.isEmpty else { return }
-                self.didInitialGmailSync = true
-                for message in messages { self.enqueueNotification(message) }
+            if self.inboxSessionInactive {
+                self.deferInboxMessages(messages)
                 return
             }
-            for message in messages {
-                self.enqueueNotification(message)
+            if !self.didInitialGmailSync {
+                guard !scan.scannedInboxAccounts.isEmpty else { return }
+                self.didInitialGmailSync = true
+                self.deferGmailScanToNotificationCenter = false
+                self.deliverInboxBundle(messages)
+                return
             }
+            if self.deferGmailScanToNotificationCenter {
+                self.deferGmailScanToNotificationCenter = false
+                self.deliverInboxBundle(messages)
+                return
+            }
+            let freshMessages = messages.filter {
+                !self.pendingNotificationFingerprints.contains($0.fingerprint)
+                    && !InboxStore.shared.hasNotificationBeenDelivered(for: $0.fingerprint)
+            }
+            if freshMessages.count > self.maximumMessagesInNotchQueue {
+                self.deliverInboxBundle(freshMessages)
+                return
+            }
+            for message in freshMessages { self.enqueueNotification(message) }
         }
     }
 
