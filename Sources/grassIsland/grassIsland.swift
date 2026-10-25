@@ -1497,7 +1497,7 @@ final class NotchView: NSView {
         )
         logo.draw(at: origin)
 
-        let subtitle = NSAttributedString(string: "NotchOS 2.1", attributes: [
+        let subtitle = NSAttributedString(string: "NotchOS 2.2", attributes: [
             .font: NSFont.systemFont(ofSize: 10, weight: .medium),
             .foregroundColor: NSColor(white: 0.92, alpha: 1)
         ])
@@ -3327,7 +3327,8 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         notch.incomingNotification = nil
         notch.incomingNotificationAlpha = 1
         deliverInboxBundle(pending)
-        resizeWindow(animated: true)
+        notch.needsDisplay = true
+        resizeWindow(animated: false)
     }
 
     private func animateIncomingNotificationAlpha(
