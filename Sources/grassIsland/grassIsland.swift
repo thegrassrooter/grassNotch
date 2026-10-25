@@ -532,12 +532,20 @@ final class InboxStore {
     }
 
     func claimNotification(for fingerprint: String) -> Bool {
-        guard !fingerprint.isEmpty, notifiedFingerprints.insert(fingerprint).inserted else { return false }
+        !claimNotifications(for: [fingerprint]).isEmpty
+    }
+
+    func claimNotifications(for fingerprints: [String]) -> Set<String> {
+        var claimed = Set<String>()
+        for fingerprint in fingerprints where !fingerprint.isEmpty {
+            if notifiedFingerprints.insert(fingerprint).inserted { claimed.insert(fingerprint) }
+        }
+        guard !claimed.isEmpty else { return [] }
         if notifiedFingerprints.count > 20_000 {
             notifiedFingerprints = Set(notifiedFingerprints.suffix(15_000))
         }
         UserDefaults.standard.set(Array(notifiedFingerprints), forKey: notifiedKey)
-        return true
+        return claimed
     }
 
     func hasNotificationBeenDelivered(for fingerprint: String) -> Bool {
@@ -546,12 +554,29 @@ final class InboxStore {
 
     @discardableResult
     func add(_ message: InboxMessage) -> Bool {
-        guard !message.fingerprint.isEmpty, !contains(fingerprint: message.fingerprint) else { return false }
-        seenFingerprints.insert(message.fingerprint)
-        messages.insert(message, at: 0)
+        add(contentsOf: [message]) > 0
+    }
+
+    /// Adds a scan's messages together so one inbox update performs one
+    /// persistence write and one UI notification, regardless of batch size.
+    @discardableResult
+    func add(contentsOf incoming: [InboxMessage]) -> Int {
+        var fingerprintsInBatch = Set<String>()
+        var additions: [InboxMessage] = []
+        additions.reserveCapacity(incoming.count)
+        for message in incoming where !message.fingerprint.isEmpty {
+            guard !contains(fingerprint: message.fingerprint),
+                  fingerprintsInBatch.insert(message.fingerprint).inserted else { continue }
+            seenFingerprints.insert(message.fingerprint)
+            additions.append(message)
+        }
+        guard !additions.isEmpty else { return 0 }
+        // Single-message insertion previously put the last scanned message at
+        // the front. Reversing the batch preserves that visible ordering.
+        messages.insert(contentsOf: additions.reversed(), at: 0)
         if messages.count > 150 { messages = Array(messages.prefix(150)) }
         persistAndNotify()
-        return true
+        return additions.count
     }
 
     func markReadAndRemove(id: String) {
@@ -736,7 +761,7 @@ enum GmailMonitor {
 
 // MARK: - WhatsApp
 
-struct WhatsAppMessageItem: Sendable {
+struct WhatsAppMessageItem: Sendable, Equatable {
     let name: String
     let avatarURL: String
     let fingerprint: String
@@ -1049,8 +1074,10 @@ final class NotchView: NSView {
         if whatsAppCallDurationSeconds != source.whatsAppCallDurationSeconds { whatsAppCallDurationSeconds = source.whatsAppCallDurationSeconds }
         if whatsAppIsMuted != source.whatsAppIsMuted { whatsAppIsMuted = source.whatsAppIsMuted }
         if whatsAppMessageActive != source.whatsAppMessageActive { whatsAppMessageActive = source.whatsAppMessageActive }
-        if whatsAppMessages.map(\.fingerprint) != source.whatsAppMessages.map(\.fingerprint) { whatsAppMessages = source.whatsAppMessages }
-        if whatsAppAvatarImages.keys.sorted() != source.whatsAppAvatarImages.keys.sorted() { whatsAppAvatarImages = source.whatsAppAvatarImages }
+        if whatsAppMessages != source.whatsAppMessages { whatsAppMessages = source.whatsAppMessages }
+        let avatarImagesDiffer = whatsAppAvatarImages.count != source.whatsAppAvatarImages.count
+            || whatsAppAvatarImages.contains { key, image in source.whatsAppAvatarImages[key] !== image }
+        if avatarImagesDiffer { whatsAppAvatarImages = source.whatsAppAvatarImages }
         if whatsAppOverflowCount != source.whatsAppOverflowCount { whatsAppOverflowCount = source.whatsAppOverflowCount }
     }
 
@@ -2334,6 +2361,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var currentShortSession = false
     private var mediaCheckInProgress = false
     private var mediaPlaybackCheckInProgress = false
+    private var lastMediaPlaybackPollAt: CFTimeInterval = 0
     private var mediaPlaybackRevision = 0
     private var lastFullMediaPollAt: CFTimeInterval = 0
     private var loadedThumbnailURL = ""
@@ -3092,7 +3120,10 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let whatsappTimer = Timer.scheduledTimer(
-            withTimeInterval: 0.25,
+            // AppleScript polling is relatively expensive. Two scans per
+            // second keeps message/call detection responsive while avoiding
+            // unnecessary process churn on slower Macs.
+            withTimeInterval: 0.5,
             repeats: true
         ) { [weak self] _ in
             Task { @MainActor in
@@ -3235,6 +3266,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
                 self.deliverInboxBundle(freshMessages)
                 return
             }
+            _ = InboxStore.shared.add(contentsOf: freshMessages)
             for message in freshMessages { self.enqueueNotification(message) }
             if !state.isActivePage, !messagesToNotify.isEmpty {
                 self.fetchAvatarImages(for: Array(messagesToNotify.prefix(4)))
@@ -3267,18 +3299,14 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private func deferInboxMessages(_ messages: [InboxMessage]) {
         for message in messages where !message.fingerprint.isEmpty {
             deferredInboxMessages[message.fingerprint] = message
-            _ = InboxStore.shared.add(message)
         }
+        _ = InboxStore.shared.add(contentsOf: messages)
     }
 
     private func deliverInboxBundle(_ messages: [InboxMessage]) {
-        var newlyDelivered: [InboxMessage] = []
-        for message in messages where !message.fingerprint.isEmpty {
-            _ = InboxStore.shared.add(message)
-            if InboxStore.shared.claimNotification(for: message.fingerprint) {
-                newlyDelivered.append(message)
-            }
-        }
+        _ = InboxStore.shared.add(contentsOf: messages)
+        let claimedFingerprints = InboxStore.shared.claimNotifications(for: messages.map(\.fingerprint))
+        let newlyDelivered = messages.filter { claimedFingerprints.contains($0.fingerprint) }
         InboxNotifications.postBundle(newlyDelivered)
     }
 
@@ -3470,6 +3498,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
                 self.deliverInboxBundle(freshMessages)
                 return
             }
+            _ = InboxStore.shared.add(contentsOf: freshMessages)
             for message in freshMessages { self.enqueueNotification(message) }
         }
     }
@@ -3822,7 +3851,14 @@ private func animateVolumeHUD(to target: CGFloat) {
     }
 
     private func pollYouTubePlaybackState() {
-        guard let tabID = currentMediaTabID, !mediaPlaybackCheckInProgress else { return }
+        let now = CACurrentMediaTime()
+        // The timer checks every 100 ms to keep the UI responsive, but avoid
+        // spawning an AppleScript process on every tick. A 250 ms ceiling is
+        // still fast enough to make play/pause changes feel immediate.
+        guard let tabID = currentMediaTabID,
+              !mediaPlaybackCheckInProgress,
+              now - lastMediaPlaybackPollAt >= 0.25 else { return }
+        lastMediaPlaybackPollAt = now
         mediaPlaybackCheckInProgress = true
         ChromeYouTube.fetchPlaybackState(tabID: tabID) { [weak self] isPlaying in
             guard let self else { return }
