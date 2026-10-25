@@ -289,12 +289,15 @@ struct GrassIslandRegressionRunner {
             let unmuted = ChromeMeetingCapture.parse("GRASS_MEET|1|1")
             let muted = ChromeMeetingCapture.parse("GRASS_MEET|1|0")
             let cameraOff = ChromeMeetingCapture.parse("GRASS_MEET|0|1")
+            let noActiveControls = ChromeMeetingCapture.parse("GRASS_MEET|0|0")
             return unmuted?.cameraInUse == true
                 && unmuted?.microphoneInUse == true
                 && muted?.cameraInUse == true
                 && muted?.microphoneInUse == false
                 && cameraOff?.cameraInUse == false
                 && cameraOff?.microphoneInUse == true
+                && noActiveControls?.cameraInUse == false
+                && noActiveControls?.microphoneInUse == false
                 && ChromeMeetingCapture.parse("NO_MEET") == nil
         }
 
