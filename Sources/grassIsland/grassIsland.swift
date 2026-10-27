@@ -137,40 +137,15 @@ enum SystemCaptureActivity {
             mediaType: .video,
             position: .unspecified
         ).devices
+        let microphones = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone],
+            mediaType: .audio,
+            position: .unspecified
+        ).devices
         return CaptureActivityState(
             cameraInUse: cameras.contains(where: \.isInUseByAnotherApplication),
-            microphoneInUse: isAnyProcessCapturingAudioInput()
+            microphoneInUse: microphones.contains(where: \.isInUseByAnotherApplication)
         )
-    }
-
-    private static func isAnyProcessCapturingAudioInput() -> Bool {
-        var listAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyProcessObjectList,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var listSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject), &listAddress, 0, nil, &listSize
-        ) == noErr, listSize >= UInt32(MemoryLayout<AudioObjectID>.size) else { return false }
-        var processIDs = [AudioObjectID](repeating: 0, count: Int(listSize) / MemoryLayout<AudioObjectID>.size)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &listAddress, 0, nil, &listSize, &processIDs
-        ) == noErr else { return false }
-
-        var runningAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioProcessPropertyIsRunningInput,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        for processID in processIDs {
-            var isRunningInput: UInt32 = 0
-            var runningSize = UInt32(MemoryLayout<UInt32>.size)
-            if AudioObjectGetPropertyData(
-                processID, &runningAddress, 0, nil, &runningSize, &isRunningInput
-            ) == noErr, isRunningInput != 0 { return true }
-        }
-        return false
     }
 
     static func icon(camera: Bool) -> NSImage? {
@@ -185,11 +160,10 @@ enum SystemCaptureActivity {
     }
 }
 
-/// Google Meet keeps the system microphone capture stream active while its
-/// in-call mute is on. macOS only reports that a process is capturing audio,
-/// so read Meet's public accessibility labels through the same Chrome
-/// automation path already used for YouTube. Other apps continue to use the
-/// system-wide Core Audio capture signal above.
+/// Google Meet can keep the microphone device reserved while its in-call mute
+/// is on. Read Meet's public accessibility labels through the same Chrome
+/// automation path already used for YouTube, while other apps use AVFoundation's
+/// microphone-device activity state.
 enum ChromeMeetingCapture {
     struct State: Equatable, Sendable {
         var cameraInUse: Bool
@@ -199,7 +173,10 @@ enum ChromeMeetingCapture {
     static func parse(_ output: String?) -> State? {
         guard let output else { return nil }
         let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "|")
-        guard parts.count == 3, parts[0] == "GRASS_MEET" else { return nil }
+        guard parts.count == 3,
+              parts[0] == "GRASS_MEET",
+              ["0", "1"].contains(String(parts[1])),
+              ["0", "1"].contains(String(parts[2])) else { return nil }
         return State(cameraInUse: parts[1] == "1", microphoneInUse: parts[2] == "1")
     }
 
@@ -211,7 +188,7 @@ enum ChromeMeetingCapture {
             repeat with w in windows
                 repeat with t in tabs of w
                     if URL of t contains "meet.google.com/" then
-                        set captureState to execute t javascript "(() => { const labels = Array.from(document.querySelectorAll('[aria-label]')).map(x => (x.getAttribute('aria-label') || '').toLowerCase()); const mic = labels.find(x => (x.includes('microphone') || x.includes('mic')) && (x.includes('turn on') || x.includes('turn off') || x.includes('mute') || x.includes('unmute'))); const camera = labels.find(x => (x.includes('camera') || x.includes('video')) && (x.includes('turn on') || x.includes('turn off') || x.includes('mute') || x.includes('unmute'))); if (!mic || !camera) return 'GRASS_MEET|0|0'; const isOn = x => !(x.includes('turn on') || x.includes('unmute')); return ['GRASS_MEET', isOn(camera) ? '1' : '0', isOn(mic) ? '1' : '0'].join('|'); })()"
+                        set captureState to execute t javascript "(() => { const labels = Array.from(document.querySelectorAll('[aria-label]')).map(x => (x.getAttribute('aria-label') || '').toLowerCase()); const mic = labels.find(x => (x.includes('microphone') || x.includes('mic')) && (x.includes('turn on') || x.includes('turn off') || x.includes('mute') || x.includes('unmute'))); const camera = labels.find(x => (x.includes('camera') || x.includes('video')) && (x.includes('turn on') || x.includes('turn off') || x.includes('mute') || x.includes('unmute'))); if (!mic || !camera) return 'GRASS_MEET|?|?'; const isOn = x => !(x.includes('turn on') || x.includes('unmute')); return ['GRASS_MEET', isOn(camera) ? '1' : '0', isOn(mic) ? '1' : '0'].join('|'); })()"
                         return captureState
                     end if
                 end repeat
@@ -2504,6 +2481,10 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var lastBluetoothPoweredOn: Bool?
     private var lastBluetoothNotificationAt: CFTimeInterval = 0
     private var captureActivityCheckInProgress = false
+    private var pendingMicrophoneActiveSamples = 0
+    private var latestSystemCaptureState = CaptureActivityState()
+    private var latestMeetingCaptureState: CaptureActivityState?
+    private var latestMeetingCaptureUpdate = Date.distantPast
     private var focusStatusTimer: Timer?
     private var youtubePollingTimer: Timer?
     private var lastFocusState: Bool?
@@ -3353,32 +3334,62 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func pollCaptureActivity() {
+        // Keep the hardware sample independent of the slower Chrome/Meet
+        // accessibility query, then merge both sources in one place so their
+        // asynchronous results cannot overwrite each other out of order.
+        Task.detached(priority: .utility) { [weak self] in
+            let systemState = SystemCaptureActivity.currentState()
+            await self?.updateSystemCaptureState(systemState)
+        }
+
         guard !captureActivityCheckInProgress else { return }
         captureActivityCheckInProgress = true
-        Task.detached(priority: .utility) { [weak self] in
-            let state = SystemCaptureActivity.currentState()
-            await self?.resolveCaptureActivity(systemState: state)
+        ChromeMeetingCapture.fetch { [weak self] meetingState in
+            guard let self else { return }
+            self.captureActivityCheckInProgress = false
+            self.latestMeetingCaptureState = meetingState.map {
+                CaptureActivityState(cameraInUse: $0.cameraInUse, microphoneInUse: $0.microphoneInUse)
+            }
+            self.latestMeetingCaptureUpdate = Date()
+            self.applyCaptureActivity(self.mergedCaptureActivityState())
         }
     }
 
-    @MainActor
-    private func resolveCaptureActivity(systemState: CaptureActivityState) {
-        ChromeMeetingCapture.fetch { [weak self] meetingState in
-            guard let self else { return }
-            let effectiveState = meetingState.map {
-                CaptureActivityState(
-                    cameraInUse: $0.cameraInUse,
-                    microphoneInUse: $0.microphoneInUse
-                )
-            } ?? systemState
-            self.applyCaptureActivity(effectiveState)
+    private func updateSystemCaptureState(_ state: CaptureActivityState) {
+        latestSystemCaptureState = state
+        applyCaptureActivity(mergedCaptureActivityState())
+    }
+
+    private func mergedCaptureActivityState() -> CaptureActivityState {
+        // A completed Meet status is authoritative for mute/camera toggles,
+        // but expires quickly if Chrome stops responding so hardware changes
+        // continue to clear indicators.
+        if let latestMeetingCaptureState,
+           Date().timeIntervalSince(latestMeetingCaptureUpdate) <= 1.5 {
+            return latestMeetingCaptureState
         }
+        latestMeetingCaptureState = nil
+        return latestSystemCaptureState
     }
 
     private func applyCaptureActivity(_ state: CaptureActivityState) {
-        captureActivityCheckInProgress = false
-        guard state != notch.captureActivity else { return }
-        notch.captureActivity = state
+        let microphoneInUse: Bool
+        if state.microphoneInUse && !notch.captureActivity.microphoneInUse {
+            // Ignore one-off startup reports from browser/media transitions;
+            // require the hardware-use signal to remain active for two polls.
+            pendingMicrophoneActiveSamples += 1
+            microphoneInUse = pendingMicrophoneActiveSamples >= 2
+        } else {
+            pendingMicrophoneActiveSamples = 0
+            microphoneInUse = state.microphoneInUse
+        }
+
+        let stabilizedState = CaptureActivityState(
+            cameraInUse: state.cameraInUse,
+            microphoneInUse: microphoneInUse
+        )
+        guard stabilizedState != notch.captureActivity else { return }
+        notch.captureActivity = stabilizedState
         resizeWindow(animated: true)
         notch.needsDisplay = true
     }
