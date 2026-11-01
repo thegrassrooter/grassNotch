@@ -1,13 +1,17 @@
 
 import AppKit
+import ApplicationServices
 import AVFoundation
 import CoreAudio
 import Darwin
 import QuartzCore
 import Foundation
 import Intents
+import IOKit
+import IOKit.graphics
 import Network
 import IOBluetooth
+import OSLog
 import SwiftUI
 
 // MARK: - Screen
@@ -322,6 +326,71 @@ enum SystemVolume {
     }
 }
 
+enum SystemBrightness {
+    static func readBuiltInDisplay() -> Float? {
+        guard let displayID = NSScreen.screens
+            .compactMap({ $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber })
+            .map({ CGDirectDisplayID($0.uint32Value) })
+            .first(where: { CGDisplayIsBuiltin($0) != 0 }) else {
+            return nil
+        }
+
+        // Find the IOKit framebuffer corresponding to this built-in display,
+        // then read its public IODisplay brightness parameter. This avoids the
+        // retired CGDisplayIOServicePort bridge on current macOS SDKs.
+        let vendor = CGDisplayVendorNumber(displayID)
+        let product = CGDisplayModelNumber(displayID)
+        guard let matching = IOServiceMatching("IOFramebuffer") else { return nil }
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+            return nil
+        }
+        defer { IOObjectRelease(iterator) }
+
+        while true {
+            let framebuffer = IOIteratorNext(iterator)
+            guard framebuffer != 0 else { break }
+            defer { IOObjectRelease(framebuffer) }
+
+            guard let unmanagedInfo = IODisplayCreateInfoDictionary(
+                framebuffer,
+                IOOptionBits(kIODisplayMatchingInfo)
+            ) else { continue }
+            let info = unmanagedInfo.takeRetainedValue() as NSDictionary
+            guard (info["DisplayVendorID"] as? NSNumber)?.uint32Value == vendor,
+                  (info["DisplayProductID"] as? NSNumber)?.uint32Value == product else {
+                continue
+            }
+            let displayService = IODisplayForFramebuffer(framebuffer, 0)
+            guard displayService != 0 else { continue }
+            defer { IOObjectRelease(displayService) }
+            var value: Float = 0
+            if IODisplayGetFloatParameter(
+                displayService,
+                0,
+                kIODisplayBrightnessKey as CFString,
+                &value
+            ) == kIOReturnSuccess, value.isFinite {
+                return min(1, max(0, value))
+            }
+
+            // Some built-in display drivers expose the current setting through
+            // the parameter dictionary even when the single-value query is not
+            // implemented. Try that supported IOGraphicsLib read path before
+            // treating brightness as unavailable.
+            var parameters: Unmanaged<CFDictionary>?
+            guard IODisplayCopyFloatParameters(displayService, 0, &parameters) == kIOReturnSuccess,
+                  let parameterDictionary = parameters?.takeRetainedValue() as? NSDictionary,
+                  let brightness = (parameterDictionary[kIODisplayBrightnessKey] as? NSNumber)?.floatValue,
+                  brightness.isFinite else {
+                continue
+            }
+            return min(1, max(0, brightness))
+        }
+        return nil
+    }
+}
+
 // MARK: - Clock Timer
 
 struct ClockTimerInfo: Sendable {
@@ -391,6 +460,68 @@ struct MediaInfo: Sendable {
 }
 
 enum ChromeYouTube {
+    @MainActor
+    static func fetchAll(
+        completion: @MainActor @Sendable @escaping ([MediaInfo]?) -> Void
+    ) {
+        let script = #"""
+        tell application "Google Chrome"
+            if not running or (count of windows) is 0 then return "[]"
+            set resultsJSON to "["
+            set separator to ""
+            repeat with w in windows
+                repeat with t in tabs of w
+                    set tabURL to URL of t
+                    if tabURL contains "youtube.com/watch" or tabURL contains "youtube.com/shorts/" or tabURL contains "youtu.be/" then
+                        set tabIDText to id of t as text
+                        set tabResult to execute t javascript "(() => { try { const u = new URL(location.href); const host = u.hostname.toLowerCase(); const yt = host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtu.be'; const shortPage = yt && u.pathname.startsWith('/shorts/'); const shortLink = host === 'youtu.be' && !!u.pathname.split('/').filter(Boolean)[0]; const watchPage = yt && ((u.pathname === '/watch' && !!u.searchParams.get('v')) || shortLink); const videoID = u.pathname === '/watch' ? (u.searchParams.get('v') || '') : (shortPage ? (u.pathname.split('/')[2] || '') : (host === 'youtu.be' ? u.pathname.split('/').filter(Boolean)[0] || '' : '')); const videos = Array.from(document.querySelectorAll('video')); const shortVideo = shortPage ? (document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video')) : null; const visibleVideo = videos.find(x => !x.paused && !x.ended && x.readyState >= 1); const v = shortVideo || visibleVideo || document.querySelector('video.html5-main-video') || videos.find(x => x.readyState >= 1) || videos[0] || null; const activeVideo = (shortPage && shortVideo) ? shortVideo : (visibleVideo || v); const active = !!(activeVideo && !activeVideo.paused && !activeVideo.ended); const duration = activeVideo && Number.isFinite(activeVideo.duration) ? activeVideo.duration : 0; const currentTime = activeVideo && Number.isFinite(activeVideo.currentTime) ? activeVideo.currentTime : 0; const thumbnailURL = videoID ? ('https://i.ytimg.com/vi/' + videoID + '/hqdefault.jpg') : ''; return JSON.stringify({ url: location.href, title: document.title || '', videoID, youtube: yt, watchPage, shortPage, playing: active, isPaused: !active, currentTime, duration, thumbnailURL }); } catch (_) { return '{}'; } })()"
+                        if tabResult is not missing value and tabResult is not "{}" then
+                            set resultsJSON to resultsJSON & separator & "{\"tabID\":" & tabIDText & ",\"media\":" & tabResult & "}"
+                            set separator to ","
+                        end if
+                    end if
+                end repeat
+            end repeat
+            return resultsJSON & "]"
+        end tell
+        """#
+
+        SystemVolume.runAppleScriptAsync(script, timeoutInterval: 3.0) { output in
+            guard let output, !output.contains("execution error"),
+                  let data = output.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8),
+                  let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                completion(nil)
+                return
+            }
+            let mediaItems = rows.compactMap { row -> MediaInfo? in
+                guard let tabID = row["tabID"] as? Int,
+                      let json = row["media"] as? [String: Any],
+                      let url = json["url"] as? String else { return nil }
+                let host = URL(string: url)?.host?.lowercased() ?? ""
+                let youtube = (json["youtube"] as? Bool)
+                    ?? (host == "youtube.com" || host.hasSuffix(".youtube.com") || host == "youtu.be")
+                let isShort = json["shortPage"] as? Bool ?? false
+                let watchPage = json["watchPage"] as? Bool ?? false
+                guard youtube, watchPage || isShort else { return nil }
+                return MediaInfo(
+                    url: url,
+                    title: (json["title"] as? String ?? "").replacingOccurrences(of: " - YouTube", with: ""),
+                    videoID: json["videoID"] as? String ?? "",
+                    isYouTube: youtube,
+                    isWatchPage: watchPage,
+                    playing: json["playing"] as? Bool ?? false,
+                    isPaused: json["isPaused"] as? Bool ?? true,
+                    currentTime: json["currentTime"] as? Double ?? 0,
+                    duration: json["duration"] as? Double ?? 0,
+                    thumbnailURL: json["thumbnailURL"] as? String ?? "",
+                    isShort: isShort,
+                    tabID: tabID
+                )
+            }
+            completion(mediaItems)
+        }
+    }
+
     @MainActor
     static func fetchPlaybackState(
         tabID: Int,
@@ -1059,8 +1190,20 @@ final class NotchView: NSView {
     var volume: Float = 0.5 { didSet { needsDisplay = true } }
     var volumeHUD = false { didSet { needsDisplay = true } }
     var volumeHUDOpacity: CGFloat = 0 { didSet { needsDisplay = true } }
+    var brightness: Float = 0.5 { didSet { needsDisplay = true } }
+    var brightnessHUD = false { didSet { needsDisplay = true } }
+    var brightnessHUDOpacity: CGFloat = 0 { didSet { needsDisplay = true } }
 
     var mediaPlaying = false { didSet { needsDisplay = true } }
+    var mediaVideoCount = 0 {
+        didSet {
+            if oldValue != mediaVideoCount { animateMediaVideoCount(from: oldValue, to: mediaVideoCount) }
+            needsDisplay = true
+        }
+    }
+    var canSelectPreviousVideo = false { didSet { needsDisplay = true } }
+    var canSelectNextVideo = false { didSet { needsDisplay = true } }
+    var mediaAnyVideoPlaying = false { didSet { needsDisplay = true } }
     var mediaTitle = "" { didSet { needsDisplay = true } }
     var mediaIsShort = false { didSet { needsDisplay = true } }
     var mediaPaused = true {
@@ -1074,12 +1217,31 @@ final class NotchView: NSView {
     private var mediaIconAnimationStart: CFTimeInterval = 0
     private var mediaIconAnimationFrom: CGFloat = 0
     private var mediaIconAnimationTo: CGFloat = 0
+    private struct MediaPageVisual {
+        let title: String
+        let thumbnail: NSImage?
+        let currentTime: Double
+        let duration: Double
+        let isShort: Bool
+    }
+    private var previousMediaPage: MediaPageVisual?
+    private var mediaPageTransitionTimer: Timer?
+    private var mediaPageTransitionStartedAt: CFTimeInterval = 0
+    private var mediaPageTransitionProgress: CGFloat = 1
+    private var mediaPageTransitionDirection: CGFloat = 1
+    private var mediaCountOutgoingValue: Int?
+    private var mediaCountIncomingValue: Int?
+    private var mediaCountTransitionTimer: Timer?
+    private var mediaCountTransitionStartedAt: CFTimeInterval = 0
+    private var mediaCountTransitionProgress: CGFloat = 1
     var mediaCurrentTime: Double = 0 { didSet { needsDisplay = true } }
     var mediaDuration: Double = 0 { didSet { needsDisplay = true } }
     var mediaThumbnail: NSImage? { didSet { needsDisplay = true } }
 
     var expanded = false { didSet { needsDisplay = true } }
     var startupSplash = false { didSet { needsDisplay = true } }
+    var grassAIPresented = false { didSet { needsDisplay = true } }
+    var grassAIThinking = false { didSet { needsDisplay = true } }
 
     var appSwitchIcon: NSImage? { didSet { needsDisplay = true } }
     var appSwitchOpacity: CGFloat = 0 { didSet { needsDisplay = true } }
@@ -1116,12 +1278,13 @@ final class NotchView: NSView {
 
     var onToggleExpanded: (@MainActor () -> Void)?
     var onDeveloperModeClick: (@MainActor (_ shiftHeld: Bool) -> Void)?
-    var onControlClickLock: (@MainActor () -> Void)?
+    var onControlClickGrassAI: (@MainActor () -> Void)?
     var onAcceptWhatsAppCall: (@MainActor () -> Void)?
     var onDeclineWhatsAppCall: (@MainActor () -> Void)?
     var onToggleWhatsAppMute: (@MainActor () -> Void)?
     var onMediaPlayPause: (@MainActor () -> Void)?
     var onMediaSeek: (@MainActor (Double) -> Void)?
+    var onMediaSelectVideo: (@MainActor (Int) -> Void)?
     var onClearIncomingMessages: (@MainActor () -> Void)?
     var onMirrorToggleExpanded: (@MainActor () -> Void)?
     var isMirror = false
@@ -1131,7 +1294,14 @@ final class NotchView: NSView {
         if volume != source.volume { volume = source.volume }
         if volumeHUD != source.volumeHUD { volumeHUD = source.volumeHUD }
         if volumeHUDOpacity != source.volumeHUDOpacity { volumeHUDOpacity = source.volumeHUDOpacity }
+        if brightness != source.brightness { brightness = source.brightness }
+        if brightnessHUD != source.brightnessHUD { brightnessHUD = source.brightnessHUD }
+        if brightnessHUDOpacity != source.brightnessHUDOpacity { brightnessHUDOpacity = source.brightnessHUDOpacity }
         if mediaPlaying != source.mediaPlaying { mediaPlaying = source.mediaPlaying }
+        if mediaVideoCount != source.mediaVideoCount { mediaVideoCount = source.mediaVideoCount }
+        if canSelectPreviousVideo != source.canSelectPreviousVideo { canSelectPreviousVideo = source.canSelectPreviousVideo }
+        if canSelectNextVideo != source.canSelectNextVideo { canSelectNextVideo = source.canSelectNextVideo }
+        if mediaAnyVideoPlaying != source.mediaAnyVideoPlaying { mediaAnyVideoPlaying = source.mediaAnyVideoPlaying }
         if mediaTitle != source.mediaTitle { mediaTitle = source.mediaTitle }
         if mediaIsShort != source.mediaIsShort { mediaIsShort = source.mediaIsShort }
         if mediaPaused != source.mediaPaused { mediaPaused = source.mediaPaused }
@@ -1140,6 +1310,8 @@ final class NotchView: NSView {
         if mediaThumbnail !== source.mediaThumbnail { mediaThumbnail = source.mediaThumbnail }
         if expanded != source.expanded { expanded = source.expanded }
         if startupSplash != source.startupSplash { startupSplash = source.startupSplash }
+        if grassAIPresented != source.grassAIPresented { grassAIPresented = source.grassAIPresented }
+        if grassAIThinking != source.grassAIThinking { grassAIThinking = source.grassAIThinking }
         if appSwitchIcon !== source.appSwitchIcon { appSwitchIcon = source.appSwitchIcon }
         if appSwitchOpacity != source.appSwitchOpacity { appSwitchOpacity = source.appSwitchOpacity }
         if currentAppIcon !== source.currentAppIcon { currentAppIcon = source.currentAppIcon }
@@ -1176,6 +1348,12 @@ final class NotchView: NSView {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let localPoint = superview.map { convert(point, from: $0) } ?? point
+        // grassAI controls live below and beside the physical notch. Let the
+        // hosting view receive pointer events across the expanded panel; the
+        // usual notch-shaped hit area is restored as soon as it closes.
+        if grassAIPresented, bounds.contains(localPoint) {
+            return super.hitTest(point)
+        }
         guard Self.shouldReceivePointer(at: localPoint, in: bounds),
               notchPath(in: bounds).contains(localPoint) else { return nil }
         return super.hitTest(point)
@@ -1202,12 +1380,17 @@ final class NotchView: NSView {
     }
 
     func shouldAcceptPointer(at point: NSPoint) -> Bool {
+        if grassAIPresented { return bounds.contains(point) }
         var extraTargets: [NSRect] = []
         if incomingNotification != nil { extraTargets.append(clearAllRect(in: bounds)) }
         if mediaPlaying && expanded {
             extraTargets.append(Self.mediaPlayControlRect(in: bounds))
             extraTargets.append(Self.mediaBackControlRect(in: bounds))
             extraTargets.append(Self.mediaForwardControlRect(in: bounds))
+            if mediaVideoCount > 1 {
+                if canSelectPreviousVideo { extraTargets.append(Self.mediaPreviousVideoRect(in: bounds)) }
+                if canSelectNextVideo { extraTargets.append(Self.mediaNextVideoRect(in: bounds)) }
+            }
         }
         if whatsAppInCall {
             extraTargets.append(NSRect(x: bounds.maxX - 104, y: bounds.midY - 9, width: 44, height: 18))
@@ -1284,6 +1467,26 @@ final class NotchView: NSView {
         let context = NSGraphicsContext.current?.cgContext
         let bounds = self.bounds
 
+        // The launch mark owns the first three seconds. System activity may
+        // update underneath it, but cannot replace or shorten the splash.
+        if startupSplash {
+            fillPitchBlack(notchPath(in: bounds))
+            drawStartupLogo(in: bounds)
+            return
+        }
+
+        if grassAIPresented {
+            fillPitchBlack(notchPath(in: bounds, cornerRadius: 26))
+            return
+        }
+
+        if grassAIThinking {
+            // Keep the physical notch completely clear while the detached
+            // grassAI orb is carrying the pending request.
+            fillPitchBlack(notchPath(in: bounds))
+            return
+        }
+
         if noNetworkAlertActive {
             drawNoNetworkAlert(in: bounds)
             return
@@ -1330,12 +1533,23 @@ final class NotchView: NSView {
 
         let switchingApp = appSwitchIcon != nil && appSwitchOpacity > 0
         let showingVolume = volumeHUD || volumeHUDOpacity > 0.001
+        let showingBrightness = brightnessHUD || brightnessHUDOpacity > 0.001
         if switchingApp {
             let context = NSGraphicsContext.current?.cgContext
             if startupSplash {
                 context?.saveGState()
                 context?.setAlpha(1 - min(1, max(0, appSwitchOpacity)))
                 drawStartupLogo(in: bounds)
+                context?.restoreGState()
+            } else if showingBrightness {
+                let transitionOpacity = 1 - min(1, max(0, appSwitchOpacity))
+                context?.saveGState()
+                context?.setAlpha(transitionOpacity * (1 - min(1, max(0, brightnessHUDOpacity))))
+                drawUnderlyingState(in: bounds)
+                context?.restoreGState()
+                context?.saveGState()
+                context?.setAlpha(transitionOpacity * min(1, max(0, brightnessHUDOpacity)))
+                drawBrightness(in: bounds)
                 context?.restoreGState()
             } else if showingVolume {
                 let transitionOpacity = 1 - min(1, max(0, appSwitchOpacity))
@@ -1360,6 +1574,20 @@ final class NotchView: NSView {
         if startupSplash {
             drawStartupLogo(in: bounds)
             if captureActivity.hasActivity { drawCaptureIndicators(in: bounds, expandedMedia: false) }
+            return
+        }
+
+        if showingBrightness {
+            let context = NSGraphicsContext.current?.cgContext
+            context?.saveGState()
+            context?.setAlpha(1 - min(1, max(0, brightnessHUDOpacity)))
+            drawUnderlyingState(in: bounds)
+            context?.restoreGState()
+
+            context?.saveGState()
+            context?.setAlpha(min(1, max(0, brightnessHUDOpacity)))
+            drawBrightness(in: bounds)
+            context?.restoreGState()
             return
         }
 
@@ -1620,7 +1848,7 @@ final class NotchView: NSView {
         )
         logo.draw(at: origin)
 
-        let subtitle = NSAttributedString(string: "NotchOS 2.5", attributes: [
+        let subtitle = NSAttributedString(string: NotchOSRelease.version, attributes: [
             .font: NSFont.systemFont(ofSize: 10, weight: .medium),
             .foregroundColor: NSColor(white: 0.92, alpha: 1)
         ])
@@ -1945,6 +2173,35 @@ final class NotchView: NSView {
         }
     }
 
+    private func drawBrightness(in bounds: NSRect) {
+        let iconRect = NSRect(x: 11, y: bounds.midY - 8, width: 17, height: 17)
+        if let icon = NSImage(systemSymbolName: "sun.max.fill", accessibilityDescription: "Brightness") {
+            let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+            (icon.withSymbolConfiguration(configuration) ?? icon).draw(
+                in: iconRect, from: .zero, operation: .sourceOver, fraction: 1,
+                respectFlipped: true, hints: nil
+            )
+        }
+
+        let barWidth: CGFloat = 64
+        let barHeight: CGFloat = 5
+        let barX = bounds.maxX - barWidth - 16
+        let barY = bounds.midY - barHeight / 2
+        let barRect = NSRect(x: barX, y: barY, width: barWidth, height: barHeight)
+        NSColor(white: 0.25, alpha: 1).setFill()
+        NSBezierPath(roundedRect: barRect, xRadius: 2.5, yRadius: 2.5).fill()
+        if brightness > 0 {
+            NSColor.white.setFill()
+            NSBezierPath(
+                roundedRect: NSRect(x: barX, y: barY,
+                                    width: max(barHeight, barWidth * CGFloat(brightness)),
+                                    height: barHeight),
+                xRadius: 2.5, yRadius: 2.5
+            ).fill()
+        }
+    }
+
     // MARK: Media
 
     private func drawMedia(in bounds: NSRect) {
@@ -1960,7 +2217,9 @@ final class NotchView: NSView {
         NSColor.white.setFill()
         triangle.fill()
 
-        guard !mediaPaused, DeveloperAnimationSettings.shared.youtubeAudioAnimationEnabled else { return }
+        drawMediaVideoCount(at: NSPoint(x: logo.maxX + 4, y: bounds.midY - 7), fontSize: 10)
+
+        guard mediaAnyVideoPlaying, DeveloperAnimationSettings.shared.youtubeAudioAnimationEnabled else { return }
         for index in 0..<4 {
             let barWidth: CGFloat = 3
             let gap: CGFloat = 3
@@ -2045,12 +2304,49 @@ final class NotchView: NSView {
             drawText("ϟ", x: width - 22, y: height - 28, size: 10, weight: .bold, color: .systemGreen)
         }
 
-        let thumbRect = NSRect(x: 18, y: height - 108, width: 62, height: 62)
-        NSColor(calibratedWhite: 0.18, alpha: 1).setFill()
-        NSBezierPath(roundedRect: thumbRect, xRadius: 14, yRadius: 14).fill()
-        if let thumbnail = mediaThumbnail, thumbnail.size.width > 0, thumbnail.size.height > 0 {
+        let selectedPage = MediaPageVisual(title: mediaTitle, thumbnail: mediaThumbnail,
+                                           currentTime: mediaCurrentTime, duration: mediaDuration,
+                                           isShort: mediaIsShort)
+        if mediaPageTransitionProgress < 1, let previousPage = previousMediaPage {
+            let clip = NSRect(x: 0, y: 64, width: width, height: max(0, height - 98))
             NSGraphicsContext.saveGraphicsState()
-            NSBezierPath(roundedRect: thumbRect, xRadius: 14, yRadius: 14).addClip()
+            NSBezierPath(rect: clip).addClip()
+            let progress = mediaPageTransitionProgress
+            let direction = mediaPageTransitionDirection
+            drawMediaPage(previousPage, in: bounds, offset: -direction * width * progress)
+            drawMediaPage(selectedPage, in: bounds, offset: direction * width * (1 - progress))
+            NSGraphicsContext.restoreGraphicsState()
+        } else {
+            drawMediaPage(selectedPage, in: bounds, offset: 0)
+        }
+
+        let backRect = Self.mediaBackControlRect(in: bounds)
+        let playButton = Self.mediaPlayControlRect(in: bounds)
+        let forwardRect = Self.mediaForwardControlRect(in: bounds)
+        drawSeekControl(in: backRect, backwards: true)
+        drawPlaybackGlyph(in: playButton, playing: false, alpha: 1 - mediaIconProgress)
+        drawPlaybackGlyph(in: playButton, playing: true, alpha: mediaIconProgress)
+        drawSeekControl(in: forwardRect, backwards: false)
+        if mediaVideoCount > 1 {
+            drawMediaVideoNavigation(in: bounds)
+        }
+    }
+
+    private func drawMediaPage(_ page: MediaPageVisual, in bounds: NSRect, offset: CGFloat) {
+        let width = bounds.width
+        let height = bounds.height
+        let multiVideo = mediaVideoCount > 1
+        let thumbSize: CGFloat = multiVideo ? 54 : 62
+        let thumbX: CGFloat = multiVideo ? 40 : 18
+        let thumbRect = NSRect(x: thumbX + offset, y: height - (multiVideo ? 104 : 108),
+                               width: thumbSize, height: thumbSize)
+        NSColor(calibratedWhite: 0.18, alpha: 1).setFill()
+        NSBezierPath(roundedRect: thumbRect, xRadius: multiVideo ? 12 : 14,
+                     yRadius: multiVideo ? 12 : 14).fill()
+        if let thumbnail = page.thumbnail, thumbnail.size.width > 0, thumbnail.size.height > 0 {
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(roundedRect: thumbRect, xRadius: multiVideo ? 12 : 14,
+                         yRadius: multiVideo ? 12 : 14).addClip()
             let imageSize = thumbnail.size
             let targetAspect = thumbRect.width / thumbRect.height
             let imageAspect = imageSize.width / imageSize.height
@@ -2071,27 +2367,39 @@ final class NotchView: NSView {
             drawText("▶", x: thumbRect.midX - 6, y: thumbRect.midY - 8, size: 18, weight: .bold)
         }
 
-        let title = mediaTitle.isEmpty ? "YouTube video" : mediaTitle
-        // Keep simultaneous camera and microphone marks clear of the title
-        // instead of drawing them over the last line of text.
-        let indicatorReserve = captureActivity.hasActivity
-            ? CGFloat(captureActivity.activeCount) * 28
-            : 0
+        let title = page.title.isEmpty ? "YouTube video" : page.title
+        let indicatorReserve = captureActivity.hasActivity ? CGFloat(captureActivity.activeCount) * 28 : 0
+        let textX = multiVideo ? 104 : 94
+        let rightReserve: CGFloat = multiVideo ? 46 : 22
         NSAttributedString(string: title, attributes: [
             .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
             .foregroundColor: NSColor.white
-        ]).draw(with: NSRect(x: 94, y: height - 79, width: max(80, width - 116 - indicatorReserve), height: 42),
+        ]).draw(with: NSRect(x: CGFloat(textX) + offset, y: height - 79,
+                             width: max(50, width - CGFloat(textX) - rightReserve - indicatorReserve), height: 42),
                 options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
-        NSAttributedString(string: "YouTube · Now playing", attributes: [
+        NSAttributedString(string: page.isShort ? "YouTube · Short" : "YouTube · Now playing", attributes: [
             .font: NSFont.systemFont(ofSize: 12, weight: .regular),
             .foregroundColor: NSColor(white: 0.58, alpha: 1)
-        ]).draw(at: NSPoint(x: 94, y: height - 104))
+        ]).draw(at: NSPoint(x: CGFloat(textX) + 24 + (mediaVideoCount > 1 ? 15 : 0) + offset,
+                            y: height - 104))
+        let youtubeMark = NSRect(x: CGFloat(textX) + offset, y: height - 104,
+                                 width: 18, height: 12)
+        NSColor(calibratedRed: 1.0, green: 0.08, blue: 0.08, alpha: 1).setFill()
+        NSBezierPath(roundedRect: youtubeMark, xRadius: 3, yRadius: 3).fill()
+        let markTriangle = NSBezierPath()
+        markTriangle.move(to: NSPoint(x: youtubeMark.minX + 7, y: youtubeMark.minY + 3))
+        markTriangle.line(to: NSPoint(x: youtubeMark.minX + 7, y: youtubeMark.maxY - 3))
+        markTriangle.line(to: NSPoint(x: youtubeMark.maxX - 4, y: youtubeMark.midY))
+        markTriangle.close()
+        NSColor.white.setFill()
+        markTriangle.fill()
+        drawMediaVideoCount(at: NSPoint(x: youtubeMark.maxX + 3 + offset, y: height - 104), fontSize: 9)
 
-        // A single rounded timeline sits between elapsed and remaining time.
-        let progressRect = Self.mediaProgressRect(in: bounds)
+        let progressRect = Self.mediaProgressRect(in: bounds).offsetBy(dx: offset, dy: 0)
         NSColor(white: 0.22, alpha: 1).setFill()
-        NSBezierPath(roundedRect: progressRect, xRadius: progressRect.height / 2, yRadius: progressRect.height / 2).fill()
-        let ratio = mediaDuration > 0 ? min(1, max(0, mediaCurrentTime / mediaDuration)) : 0
+        NSBezierPath(roundedRect: progressRect, xRadius: progressRect.height / 2,
+                     yRadius: progressRect.height / 2).fill()
+        let ratio = page.duration > 0 ? min(1, max(0, page.currentTime / page.duration)) : 0
         if ratio > 0 {
             NSColor(calibratedRed: 0.39, green: 0.70, blue: 0.80, alpha: 1).setFill()
             NSBezierPath(roundedRect: NSRect(x: progressRect.minX, y: progressRect.minY,
@@ -2099,22 +2407,128 @@ final class NotchView: NSView {
                                              height: progressRect.height),
                          xRadius: progressRect.height / 2, yRadius: progressRect.height / 2).fill()
         }
-        let elapsed = mediaTime(mediaCurrentTime)
-        let remaining = "-\(mediaTime(max(0, mediaDuration - mediaCurrentTime)))"
         let timelineFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
         let timelineColor = NSColor(white: 0.64, alpha: 1)
-        NSAttributedString(string: elapsed, attributes: [.font: timelineFont, .foregroundColor: timelineColor])
-            .draw(at: NSPoint(x: 18, y: progressRect.midY - 6))
-        let remainingText = NSAttributedString(string: remaining, attributes: [.font: timelineFont, .foregroundColor: timelineColor])
-        remainingText.draw(at: NSPoint(x: width - 18 - remainingText.size().width, y: progressRect.midY - 6))
+        NSAttributedString(string: mediaTime(page.currentTime), attributes: [
+            .font: timelineFont, .foregroundColor: timelineColor
+        ]).draw(at: NSPoint(x: 18 + offset, y: progressRect.midY - 6))
+        let remainingText = NSAttributedString(string: "-\(mediaTime(max(0, page.duration - page.currentTime)))", attributes: [
+            .font: timelineFont, .foregroundColor: timelineColor
+        ])
+        remainingText.draw(at: NSPoint(x: width - 18 - remainingText.size().width + offset,
+                                       y: progressRect.midY - 6))
+    }
 
-        let backRect = Self.mediaBackControlRect(in: bounds)
-        let playButton = Self.mediaPlayControlRect(in: bounds)
-        let forwardRect = Self.mediaForwardControlRect(in: bounds)
-        drawSeekControl(in: backRect, backwards: true)
-        drawPlaybackGlyph(in: playButton, playing: false, alpha: 1 - mediaIconProgress)
-        drawPlaybackGlyph(in: playButton, playing: true, alpha: mediaIconProgress)
-        drawSeekControl(in: forwardRect, backwards: false)
+    private func drawMediaVideoNavigation(in bounds: NSRect) {
+        drawMediaVideoArrow(in: Self.mediaPreviousVideoRect(in: bounds), symbol: "chevron.left",
+                            enabled: canSelectPreviousVideo)
+        drawMediaVideoArrow(in: Self.mediaNextVideoRect(in: bounds), symbol: "chevron.right",
+                            enabled: canSelectNextVideo)
+    }
+
+    private func drawMediaVideoArrow(in rect: NSRect, symbol: String, enabled: Bool) {
+        NSColor(calibratedWhite: enabled ? 0.36 : 0.22, alpha: enabled ? 0.96 : 0.70).setFill()
+        NSBezierPath(ovalIn: rect).fill()
+        let path = NSBezierPath()
+        path.lineWidth = 3.0
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let direction: CGFloat = symbol == "chevron.left" ? -1 : 1
+        path.move(to: NSPoint(x: center.x - 2.4 * direction, y: center.y + 5.3))
+        path.line(to: NSPoint(x: center.x + 3.0 * direction, y: center.y))
+        path.line(to: NSPoint(x: center.x - 2.4 * direction, y: center.y - 5.3))
+        NSColor.white.withAlphaComponent(enabled ? 1 : 0.36).setStroke()
+        path.stroke()
+    }
+
+    private func animateMediaVideoCount(from oldCount: Int, to newCount: Int) {
+        mediaCountTransitionTimer?.invalidate()
+        mediaCountTransitionTimer = nil
+        guard oldCount != newCount, oldCount > 1 || newCount > 1 else {
+            mediaCountOutgoingValue = nil
+            mediaCountIncomingValue = nil
+            mediaCountTransitionProgress = 1
+            return
+        }
+        mediaCountOutgoingValue = oldCount > 1 ? oldCount : nil
+        mediaCountIncomingValue = newCount > 1 ? newCount : nil
+        mediaCountTransitionProgress = 0
+        mediaCountTransitionStartedAt = CACurrentMediaTime()
+        mediaCountTransitionTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let raw = min(1, max(0, (CACurrentMediaTime() - self.mediaCountTransitionStartedAt) / 0.26))
+                let eased = 1 - pow(1 - raw, 3)
+                self.mediaCountTransitionProgress = CGFloat(eased)
+                self.needsDisplay = true
+                if raw >= 1 {
+                    self.mediaCountOutgoingValue = nil
+                    self.mediaCountIncomingValue = self.mediaVideoCount > 1 ? self.mediaVideoCount : nil
+                    self.mediaCountTransitionProgress = 1
+                    self.mediaCountTransitionTimer?.invalidate()
+                    self.mediaCountTransitionTimer = nil
+                }
+            }
+        }
+        if let mediaCountTransitionTimer {
+            RunLoop.main.add(mediaCountTransitionTimer, forMode: .common)
+        }
+    }
+
+    private func drawMediaVideoCount(at origin: NSPoint, fontSize: CGFloat) {
+        let progress = mediaCountTransitionProgress
+        let baseline = NSColor(white: 0.84, alpha: 1)
+        if let outgoing = mediaCountOutgoingValue {
+            drawMediaCountValue(outgoing, at: NSPoint(x: origin.x, y: origin.y + 3 * progress),
+                                fontSize: fontSize, alpha: 1 - progress, color: baseline)
+        }
+        if let incoming = mediaCountIncomingValue {
+            let enteringOffset: CGFloat = mediaCountOutgoingValue == nil ? 3 * (1 - progress) : -3 * (1 - progress)
+            let alpha = mediaCountOutgoingValue == nil ? progress : progress
+            drawMediaCountValue(incoming, at: NSPoint(x: origin.x, y: origin.y + enteringOffset),
+                                fontSize: fontSize, alpha: alpha, color: baseline)
+        }
+        if mediaCountTransitionProgress >= 1, mediaCountOutgoingValue == nil,
+           mediaCountIncomingValue == nil, mediaVideoCount > 1 {
+            drawMediaCountValue(mediaVideoCount, at: origin, fontSize: fontSize, alpha: 1, color: baseline)
+        }
+    }
+
+    private func drawMediaCountValue(_ value: Int, at origin: NSPoint, fontSize: CGFloat,
+                                    alpha: CGFloat, color: NSColor) {
+        guard alpha > 0.01 else { return }
+        NSAttributedString(string: "\(value)", attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .semibold),
+            .foregroundColor: color.withAlphaComponent(alpha)
+        ]).draw(at: origin)
+    }
+
+    func beginMediaPageTransition(direction: Int) {
+        guard direction != 0 else { return }
+        previousMediaPage = MediaPageVisual(title: mediaTitle, thumbnail: mediaThumbnail,
+                                            currentTime: mediaCurrentTime, duration: mediaDuration,
+                                            isShort: mediaIsShort)
+        mediaPageTransitionDirection = direction > 0 ? 1 : -1
+        mediaPageTransitionProgress = 0
+        mediaPageTransitionStartedAt = CACurrentMediaTime()
+        mediaPageTransitionTimer?.invalidate()
+        mediaPageTransitionTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let raw = min(1, max(0, (CACurrentMediaTime() - self.mediaPageTransitionStartedAt) / 0.30))
+                let eased = raw * raw * (3 - 2 * raw)
+                self.mediaPageTransitionProgress = CGFloat(eased)
+                self.needsDisplay = true
+                if raw >= 1 {
+                    self.previousMediaPage = nil
+                    self.mediaPageTransitionProgress = 1
+                    self.mediaPageTransitionTimer?.invalidate()
+                    self.mediaPageTransitionTimer = nil
+                }
+            }
+        }
+        RunLoop.main.add(mediaPageTransitionTimer!, forMode: .common)
     }
 
     private func drawSeekControl(in rect: NSRect, backwards: Bool) {
@@ -2155,6 +2569,14 @@ final class NotchView: NSView {
 
     static func mediaForwardControlRect(in bounds: NSRect) -> NSRect {
         NSRect(x: bounds.midX + 49, y: 8, width: 42, height: 42)
+    }
+
+    static func mediaPreviousVideoRect(in bounds: NSRect) -> NSRect {
+        NSRect(x: 7, y: bounds.height - 88, width: 26, height: 26)
+    }
+
+    static func mediaNextVideoRect(in bounds: NSRect) -> NSRect {
+        NSRect(x: bounds.width - 33, y: bounds.height - 88, width: 26, height: 26)
     }
 
     static func mediaSeekArrowDirection(backwards: Bool) -> CGFloat {
@@ -2322,6 +2744,7 @@ final class NotchView: NSView {
         let bounds = self.bounds
         let loc = viewPoint
         guard bounds.contains(loc) else { return }
+        if grassAIThinking { return }
 
         if event.modifierFlags.contains(.option) {
             onDeveloperModeClick?(event.modifierFlags.contains(.shift))
@@ -2329,7 +2752,7 @@ final class NotchView: NSView {
         }
 
         if event.modifierFlags.contains(.control) {
-            onControlClickLock?()
+            onControlClickGrassAI?()
             return
         }
 
@@ -2389,6 +2812,16 @@ final class NotchView: NSView {
 
         if mediaPlaying {
             if expanded {
+                if mediaVideoCount > 1 {
+                    if canSelectPreviousVideo && Self.mediaPreviousVideoRect(in: bounds).contains(loc) {
+                        onMediaSelectVideo?(-1)
+                        return
+                    }
+                    if canSelectNextVideo && Self.mediaNextVideoRect(in: bounds).contains(loc) {
+                        onMediaSelectVideo?(1)
+                        return
+                    }
+                }
                 let playButton = Self.mediaPlayControlRect(in: bounds)
                 let backButton = Self.mediaBackControlRect(in: bounds)
                 let forwardButton = Self.mediaForwardControlRect(in: bounds)
@@ -2428,13 +2861,161 @@ private final class MirroredNotchDisplay {
     let displayID: UInt32
     let panel: NSPanel
     let view: NotchView
+    let grassAIHost: GrassAIHostingView
     let developerHost: DeveloperHostingView
 
-    init(displayID: UInt32, panel: NSPanel, view: NotchView, developerHost: DeveloperHostingView) {
+    init(displayID: UInt32, panel: NSPanel, view: NotchView, grassAIHost: GrassAIHostingView, developerHost: DeveloperHostingView) {
         self.displayID = displayID
         self.panel = panel
         self.view = view
+        self.grassAIHost = grassAIHost
         self.developerHost = developerHost
+    }
+}
+
+/// A borderless status panel is non-activating in its normal state, but must
+/// become key when grassAI or Developer Controls temporarily remove that style
+/// so embedded text fields and authentication UI can receive keyboard input.
+private final class InteractiveNotchPanel: NSPanel {
+    override var canBecomeKey: Bool {
+        !styleMask.contains(.nonactivatingPanel)
+    }
+
+    override var canBecomeMain: Bool { false }
+}
+
+private struct CommandKeySample {
+    let timestamp: TimeInterval
+    let keyCode: UInt16
+    let isCommandDown: Bool
+    let hasOtherModifiers: Bool
+    let isKeyDown: Bool
+}
+
+@MainActor
+private final class CommandDoubleTapMonitor {
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.grassisland.app", category: "GrassAIShortcut")
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
+    private var permissionRefreshTimer: Timer?
+    private var commandIsDown = false
+    private var commandPressStartedAt: TimeInterval = 0
+    private var commandPressWasChorded = false
+    private var previousTapAt: TimeInterval?
+    private var lastAccessibilityTrust: Bool?
+    private let tapInterval: TimeInterval = 0.60
+    private let maxPressDuration: TimeInterval = 0.50
+    var onDoubleTap: (() -> Void)?
+
+    func install() {
+        guard localMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown]
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            self?.enqueue(event)
+            return event
+        }
+        refreshGlobalMonitor()
+        permissionRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshGlobalMonitor() }
+        }
+    }
+
+    func invalidate() {
+        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
+        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
+        permissionRefreshTimer?.invalidate()
+        permissionRefreshTimer = nil
+        globalMonitor = nil
+        localMonitor = nil
+        commandIsDown = false
+        previousTapAt = nil
+    }
+
+    private func refreshGlobalMonitor() {
+        let isTrusted = AXIsProcessTrusted()
+        if lastAccessibilityTrust != isTrusted {
+            lastAccessibilityTrust = isTrusted
+            logger.info("Accessibility access for the global shortcut: \(isTrusted ? "granted" : "not granted", privacy: .public)")
+        }
+        guard isTrusted else {
+            return
+        }
+        guard globalMonitor == nil else {
+            permissionRefreshTimer?.invalidate()
+            permissionRefreshTimer = nil
+            return
+        }
+
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
+            self?.enqueue(event)
+        }
+        if globalMonitor != nil {
+            logger.info("Global Command double-tap monitor active")
+            permissionRefreshTimer?.invalidate()
+            permissionRefreshTimer = nil
+        }
+    }
+
+    private func enqueue(_ event: NSEvent) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let sample = CommandKeySample(
+            timestamp: event.timestamp,
+            keyCode: event.keyCode,
+            isCommandDown: flags.contains(.command),
+            hasOtherModifiers: !flags.intersection([.shift, .option, .control, .function]).isEmpty,
+            isKeyDown: event.type == .keyDown
+        )
+        Task { @MainActor [weak self] in self?.receive(sample) }
+    }
+
+    private func receive(_ sample: CommandKeySample) {
+        if sample.isKeyDown {
+            // Some keyboard event sources also deliver a key-down event for
+            // the modifier itself. Treat only a non-Command key as a chord.
+            let isCommandKey = sample.keyCode == 54 || sample.keyCode == 55
+            if !isCommandKey {
+                previousTapAt = nil
+                if commandIsDown { commandPressWasChorded = true }
+            }
+            return
+        }
+
+        let isCommandKey = sample.keyCode == 54 || sample.keyCode == 55
+        guard isCommandKey else {
+            if sample.hasOtherModifiers {
+                previousTapAt = nil
+                if commandIsDown { commandPressWasChorded = true }
+            }
+            return
+        }
+
+        if sample.isCommandDown {
+            guard !commandIsDown else { return }
+            commandIsDown = true
+            commandPressStartedAt = sample.timestamp
+            commandPressWasChorded = sample.hasOtherModifiers
+            if commandPressWasChorded { previousTapAt = nil }
+            return
+        }
+
+        guard commandIsDown else { return }
+        commandIsDown = false
+        let duration = sample.timestamp - commandPressStartedAt
+        guard !commandPressWasChorded,
+              !sample.hasOtherModifiers,
+              duration >= 0.01,
+              duration <= maxPressDuration else {
+            previousTapAt = nil
+            return
+        }
+
+        if let previousTapAt, sample.timestamp - previousTapAt <= tapInterval {
+            self.previousTapAt = nil
+            logger.info("Command double-tap recognized")
+            onDoubleTap?()
+        } else {
+            previousTapAt = sample.timestamp
+        }
     }
 }
 
@@ -2453,6 +3034,11 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var displaySyncTimer: Timer?
     private var pointerAcceptanceTimer: Timer?
     private let developerMode = DeveloperModeManager()
+    private let grassAIModel = GrassAIModel()
+    private let grassAIEdgeGlow = GrassAIEdgeGlowController()
+    private let grassAIThinkingOrb = GrassAIThinkingOrbController()
+    private let grassAIShortcut = CommandDoubleTapMonitor()
+    private var grassAIHost: GrassAIHostingView?
     private var developerHost: DeveloperHostingView?
     private var developerSessionObservers: [NSObjectProtocol] = []
     private var lastDeveloperPermissionStates: [String: String] = [:]
@@ -2471,6 +3057,11 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var volumeAnimationStartedAt: TimeInterval = 0
     private var volumeAnimationFrom: CGFloat = 0
     private var volumeAnimationTo: CGFloat = 0
+    private var brightnessAnimationTimer: Timer?
+    private var brightnessAnimationStartedAt: TimeInterval = 0
+    private var brightnessAnimationFrom: CGFloat = 0
+    private var brightnessAnimationTo: CGFloat = 0
+    private var lastBrightness: Float?
 
     private var timers: [Timer] = []
     private var appActivationObserver: NSObjectProtocol?
@@ -2529,6 +3120,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var currentMediaVideoID = ""
     private var currentMediaTabID: Int?
     private var currentShortSession = false
+    private var youtubeMediaItems: [MediaInfo] = []
     private var mediaCheckInProgress = false
     private var mediaPlaybackCheckInProgress = false
     private var lastMediaPlaybackPollAt: CFTimeInterval = 0
@@ -2566,7 +3158,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             height: idleHeight
         )
 
-        panel = NSPanel(
+        panel = InteractiveNotchPanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -2594,6 +3186,21 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
         panel.contentView = notch
 
+        let aiHost = GrassAIHostingView(rootView: GrassAIView(
+            model: grassAIModel,
+            safeAreaTop: screen.safeAreaInsets.top,
+            allowsInput: true,
+            onPromptInteraction: { [weak self] in self?.reactivateGrassAIPrompt() }
+        ))
+        aiHost.frame = notch.bounds
+        aiHost.autoresizingMask = [.width, .height]
+        aiHost.safeAreaRegions = []
+        aiHost.wantsLayer = true
+        aiHost.layer?.backgroundColor = NSColor.clear.cgColor
+        aiHost.isGrassAIActive = { [model = grassAIModel] in model.isPresented }
+        notch.addSubview(aiHost, positioned: .above, relativeTo: nil)
+        grassAIHost = aiHost
+
         developerHost = DeveloperHostingView(rootView: DeveloperOverlayRoot(
             manager: developerMode,
             snapshotProvider: { [weak self] in await self?.makeDeveloperSnapshot() ?? .environment },
@@ -2603,6 +3210,15 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             returnToDefault: { [weak self] in self?.developerReturnToDefaultState() }
         ))
         developerHost?.safeAreaRegions = []
+        grassAIModel.onPresentationChange = { [weak self] presented in
+            self?.applyGrassAIPresentation(presented)
+        }
+        grassAIModel.onConversationChange = { [weak self] in
+            self?.resizeWindow(animated: true)
+        }
+        grassAIModel.onThinkingChange = { [weak self] thinking in
+            self?.applyGrassAIThinkingState(thinking)
+        }
         developerMode.onPresentationChange = { [weak self] presentation in
             self?.applyDeveloperPresentation(presentation)
         }
@@ -2612,6 +3228,10 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         notch.onDeveloperModeClick = { [weak self] shiftHeld in
             self?.developerMode.handleOptionClick(shiftHeld: shiftHeld)
         }
+        grassAIShortcut.onDoubleTap = { [weak self] in
+            self?.presentGrassAIIfAllowed()
+        }
+        grassAIShortcut.install()
         developerHost?.onDeveloperClick = { [weak self] shiftHeld in
             self?.developerMode.handleOptionClick(shiftHeld: shiftHeld)
         }
@@ -2631,8 +3251,8 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
         notch.onClearIncomingMessages = { [weak self] in self?.clearIncomingMessagesToNotificationCenter() }
 
-        notch.onControlClickLock = { [weak self] in
-            self?.lockScreen()
+        notch.onControlClickGrassAI = { [weak self] in
+            self?.presentGrassAIIfAllowed()
         }
 
         notch.onAcceptWhatsAppCall = { [weak self] in
@@ -2683,6 +3303,9 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             self.notch.needsDisplay = true
             ChromeYouTube.performVideoAction("seek", seekSeconds: seconds, tabID: tabID, videoID: self.currentMediaVideoID)
         }
+        notch.onMediaSelectVideo = { [weak self] direction in
+            self?.selectYouTubeVideo(direction: direction)
+        }
 
         refreshMirroredDisplays()
         let screenChangeObserver = NotificationCenter.default.addObserver(
@@ -2726,7 +3349,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         RunLoop.main.add(youtubeTimer, forMode: .common)
         notch.expanded = true
         resizeWindow(animated: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self = self else { return }
             self.notch.startupSplash = false
             self.notch.expanded = false
@@ -2771,12 +3394,13 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             mirrorView.autoresizingMask = [.width, .height]
             mirrorView.isMirror = true
             mirrorView.onDeveloperModeClick = notch.onDeveloperModeClick
-            mirrorView.onControlClickLock = notch.onControlClickLock
+            mirrorView.onControlClickGrassAI = notch.onControlClickGrassAI
             mirrorView.onAcceptWhatsAppCall = notch.onAcceptWhatsAppCall
             mirrorView.onDeclineWhatsAppCall = notch.onDeclineWhatsAppCall
             mirrorView.onToggleWhatsAppMute = notch.onToggleWhatsAppMute
             mirrorView.onMediaPlayPause = notch.onMediaPlayPause
             mirrorView.onMediaSeek = notch.onMediaSeek
+            mirrorView.onMediaSelectVideo = notch.onMediaSelectVideo
             mirrorView.onClearIncomingMessages = notch.onClearIncomingMessages
             mirrorView.onMirrorToggleExpanded = { [weak self] in
                 guard let self else { return }
@@ -2784,6 +3408,17 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
                 self.notch.onToggleExpanded?()
             }
             mirrorPanel.contentView = mirrorView
+
+            let mirrorAIHost = GrassAIHostingView(rootView: GrassAIView(
+                model: grassAIModel,
+                safeAreaTop: screen.safeAreaInsets.top,
+                allowsInput: false
+            ))
+            mirrorAIHost.frame = mirrorView.bounds
+            mirrorAIHost.autoresizingMask = [.width, .height]
+            mirrorAIHost.safeAreaRegions = []
+            mirrorAIHost.isGrassAIActive = { [model = grassAIModel] in model.isPresented }
+            mirrorView.addSubview(mirrorAIHost, positioned: .above, relativeTo: nil)
 
             let mirrorHost = DeveloperHostingView(rootView: DeveloperOverlayRoot(
                 manager: developerMode,
@@ -2796,7 +3431,8 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             mirrorHost.safeAreaRegions = []
             mirrorHost.onDeveloperClick = notch.onDeveloperModeClick
             mirroredNotches[identifier] = MirroredNotchDisplay(
-                displayID: identifier, panel: mirrorPanel, view: mirrorView, developerHost: mirrorHost
+                displayID: identifier, panel: mirrorPanel, view: mirrorView,
+                grassAIHost: mirrorAIHost, developerHost: mirrorHost
             )
             mirrorPanel.orderFrontRegardless()
         }
@@ -2843,6 +3479,110 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             let shouldIgnore = !developerPanelIsInteractive
                 && !mirror.view.shouldAcceptPointer(at: mirror.view.convert(mirror.panel.convertPoint(fromScreen: cursorLocation), from: nil))
             if mirror.panel.ignoresMouseEvents != shouldIgnore { mirror.panel.ignoresMouseEvents = shouldIgnore }
+        }
+    }
+
+    private func applyGrassAIPresentation(_ presented: Bool) {
+        guard let panel, let notch else { return }
+        if presented, developerMode.presentation != .closed {
+            grassAIModel.dismiss()
+            return
+        }
+
+        notch.grassAIPresented = presented
+        if presented, let screen = NSScreen.notchScreen {
+            grassAIEdgeGlow.show(on: screen)
+        }
+        var styleMask = panel.styleMask
+        if presented {
+            styleMask.remove(.nonactivatingPanel)
+            panel.styleMask = styleMask
+            panel.becomesKeyOnlyIfNeeded = false
+            panel.level = .statusBar
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                guard let self, self.grassAIModel.isPresented else { return }
+                self.grassAIModel.requestPromptFocus()
+            }
+        } else {
+            if panel.isKeyWindow { panel.resignKey() }
+            styleMask.insert(.nonactivatingPanel)
+            panel.styleMask = styleMask
+            panel.becomesKeyOnlyIfNeeded = true
+            panel.level = .statusBar
+        }
+        resizeWindow(animated: true)
+        syncMirroredNotches(animated: true)
+    }
+
+    private func presentGrassAIIfAllowed() {
+        guard developerMode.presentation == .closed,
+              !grassAIModel.isPresented,
+              !grassAIModel.isThinking else { return }
+        grassAIModel.present()
+    }
+
+    private func reactivateGrassAIPrompt() {
+        guard let panel,
+              grassAIModel.isPresented,
+              !grassAIModel.isThinking,
+              developerMode.presentation == .closed else { return }
+
+        // The notch panel can lose key status when the user clicks another
+        // app. Reclaim key status on an explicit prompt-field click so the
+        // embedded SwiftUI TextField can resume keyboard input immediately.
+        NSApp.activate(ignoringOtherApps: true)
+        var styleMask = panel.styleMask
+        styleMask.remove(.nonactivatingPanel)
+        panel.styleMask = styleMask
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.level = .statusBar
+        panel.makeKeyAndOrderFront(nil)
+        grassAIModel.requestPromptFocus()
+    }
+
+    private func applyGrassAIThinkingState(_ thinking: Bool) {
+        guard let panel, let notch else { return }
+        notch.grassAIThinking = thinking
+        notch.grassAIPresented = !thinking && grassAIModel.isPresented
+        grassAIHost?.isHidden = thinking
+
+        for mirror in mirroredNotches.values {
+            mirror.view.grassAIThinking = thinking
+            mirror.view.grassAIPresented = !thinking && grassAIModel.isPresented
+            mirror.grassAIHost.isHidden = thinking
+        }
+
+        var styleMask = panel.styleMask
+        if thinking {
+            if panel.isKeyWindow { panel.resignKey() }
+            styleMask.insert(.nonactivatingPanel)
+            panel.becomesKeyOnlyIfNeeded = true
+            panel.styleMask = styleMask
+            if let screen = NSScreen.notchScreen {
+                grassAIThinkingOrb.show(on: screen, notchHeight: idleHeight)
+            }
+        } else {
+            styleMask.remove(.nonactivatingPanel)
+            panel.styleMask = styleMask
+            panel.becomesKeyOnlyIfNeeded = false
+            panel.level = .statusBar
+            panel.makeKeyAndOrderFront(nil)
+            if let screen = NSScreen.notchScreen {
+                grassAIThinkingOrb.reconnect(on: screen, notchHeight: screen.safeAreaInsets.top)
+            }
+        }
+        resizeWindow(animated: true)
+        syncMirroredNotches(animated: true)
+        if !thinking {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.52) { [weak self] in
+                guard let self,
+                      self.grassAIModel.isPresented,
+                      !self.grassAIModel.isThinking,
+                      self.panel.isKeyWindow else { return }
+                self.grassAIModel.requestPromptFocus()
+            }
         }
     }
 
@@ -3064,7 +3804,11 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openDeveloperSystemSettings() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
+        if let accessibilitySettings = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(accessibilitySettings)
+        } else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
+        }
     }
 
     private func developerReturnToDefaultState() {
@@ -3100,15 +3844,6 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         callTimer?.invalidate()
         callTimer = nil
         notch.whatsAppCallDurationSeconds = 0
-    }
-
-    // MARK: Lock Screen
-
-    private func lockScreen() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        process.arguments = ["displaysleepnow"]
-        try? process.run()
     }
 
     // MARK: App Activation
@@ -3265,6 +4000,11 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        pollBrightness()
+        let brightnessTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pollBrightness() }
+        }
+
         let systemTimer = Timer.scheduledTimer(
             withTimeInterval: 0.5,
             repeats: true
@@ -3320,6 +4060,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
         timers = [
             volumeTimer,
+            brightnessTimer,
             systemTimer,
             clockTimer,
             bluetoothTimer,
@@ -3935,6 +4676,15 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
 
         if let previous = lastVolume,
            abs(current - previous) > 0.015 {
+            NSObject.cancelPreviousPerformRequests(
+                withTarget: self,
+                selector: #selector(hideBrightnessHUD),
+                object: nil
+            )
+            if notch.brightnessHUD {
+                notch.brightnessHUD = false
+                animateBrightnessHUD(to: 0)
+            }
             notch.volume = current
             notch.volumeHUD = true
             animateVolumeHUD(to: 1)
@@ -3959,10 +4709,44 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         lastVolume = current
     }
 
+    private func pollBrightness() {
+        guard let current = SystemBrightness.readBuiltInDisplay() else { return }
+        if let previous = lastBrightness, abs(current - previous) > 0.015 {
+            NSObject.cancelPreviousPerformRequests(
+                withTarget: self,
+                selector: #selector(hideVolumeHUD),
+                object: nil
+            )
+            if notch.volumeHUD {
+                notch.volumeHUD = false
+                animateVolumeHUD(to: 0)
+            }
+            notch.brightness = current
+            notch.brightnessHUD = true
+            animateBrightnessHUD(to: 1)
+            resizeWindow(animated: true)
+            NSObject.cancelPreviousPerformRequests(
+                withTarget: self,
+                selector: #selector(hideBrightnessHUD),
+                object: nil
+            )
+            perform(#selector(hideBrightnessHUD), with: nil, afterDelay: 2)
+        } else if notch.brightnessHUD {
+            notch.brightness = current
+        }
+        lastBrightness = current
+    }
+
     @objc private func hideVolumeHUD() {
         notch.volumeHUD = false
         resizeWindow(animated: true)
         animateVolumeHUD(to: 0)
+    }
+
+    @objc private func hideBrightnessHUD() {
+        notch.brightnessHUD = false
+        resizeWindow(animated: true)
+        animateBrightnessHUD(to: 0)
     }
 
     @MainActor
@@ -4009,85 +4793,135 @@ private func animateVolumeHUD(to target: CGFloat) {
     RunLoop.main.add(timer, forMode: .common)
 }
 
+    private func animateBrightnessHUD(to target: CGFloat) {
+        brightnessAnimationTimer?.invalidate()
+        brightnessAnimationTimer = nil
+        brightnessAnimationFrom = notch.brightnessHUDOpacity
+        brightnessAnimationTo = target
+        brightnessAnimationStartedAt = CACurrentMediaTime()
+
+        let duration: TimeInterval = 0.22
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let progress = min(1, max(0, (CACurrentMediaTime() - self.brightnessAnimationStartedAt) / duration))
+                let eased = progress * progress * (3 - 2 * progress)
+                self.notch.brightnessHUDOpacity = self.brightnessAnimationFrom
+                    + (self.brightnessAnimationTo - self.brightnessAnimationFrom) * CGFloat(eased)
+                if progress >= 1 {
+                    self.brightnessAnimationTimer?.invalidate()
+                    self.brightnessAnimationTimer = nil
+                    self.notch.brightnessHUDOpacity = self.brightnessAnimationTo
+                }
+            }
+        }
+        brightnessAnimationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
     // MARK: YouTube
 
     private func pollYouTube() {
         guard !mediaCheckInProgress else { return }
         let now = CACurrentMediaTime()
-        let minimumInterval: CFTimeInterval = currentMediaTabID == nil ? 0.5 : 1.2
+        let minimumInterval: CFTimeInterval = currentMediaTabID == nil ? 0.5 : 0.65
         guard now - lastFullMediaPollAt >= minimumInterval else { return }
         lastFullMediaPollAt = now
         mediaCheckInProgress = true
         let playbackRevisionAtStart = mediaPlaybackRevision
-        ChromeYouTube.fetch(preferredTabID: currentMediaTabID) { [weak self] media in
+        ChromeYouTube.fetchAll { [weak self] mediaItems in
             guard let self = self else { return }
             self.mediaCheckInProgress = false
             // Preserve the current state on a genuine AppleScript failure.
-            guard let media else { return }
+            guard let mediaItems else { return }
+            self.youtubeMediaItems = mediaItems
+            self.notch.mediaVideoCount = mediaItems.count
+            self.notch.mediaAnyVideoPlaying = mediaItems.contains(where: \.playing)
 
-            // A missing tracked tab means it was closed (or Chrome has no windows).
-            if media.tabID < 0 {
+            guard !mediaItems.isEmpty else {
                 guard self.currentMediaTabID != nil else { return }
-                self.currentMediaTabID = nil
-                self.currentMediaVideoID = ""
-                self.currentMediaKey = ""
-                self.currentMediaTitle = ""
-                self.currentShortSession = false
-                self.notch.mediaPlaying = false
-                self.notch.mediaIsShort = false
-                self.notch.mediaTitle = ""
-                self.notch.expanded = false
-                self.notch.mediaThumbnail = nil
-                self.loadedThumbnailURL = ""
+                self.clearTrackedYouTubeSelection()
                 self.resizeWindow()
                 return
             }
 
-            // Once tracking a tab, follow that exact tab even when Chrome is backgrounded.
-            // Leaving the watch/Shorts route (e.g. navigating to YouTube Home) ends the session.
-            guard media.isYouTube, media.isWatchPage || media.isShort else {
-                self.currentMediaTabID = nil
-                self.currentMediaVideoID = ""
-                self.currentMediaKey = ""
-                self.currentMediaTitle = ""
-                self.currentShortSession = false
-                self.notch.mediaPlaying = false
-                self.notch.mediaIsShort = false
-                self.notch.mediaTitle = ""
-                self.notch.expanded = false
-                self.notch.mediaThumbnail = nil
-                self.loadedThumbnailURL = ""
-                self.resizeWindow()
-                return
-            }
-
-            let key = "\(media.tabID):\(media.isShort ? "shorts" : "watch"):\(media.videoID)"
-            let isNewVideo = key != self.currentMediaKey
-            self.currentMediaTabID = media.tabID
-            self.currentMediaVideoID = media.videoID
-            self.currentMediaKey = key
-            self.currentShortSession = media.isShort
-
-            if isNewVideo {
-                self.currentMediaTitle = media.title
-                self.notch.mediaTitle = media.title.isEmpty ? "YouTube video" : media.title
-            } else if !media.title.isEmpty && media.title != self.currentMediaTitle {
-                self.currentMediaTitle = media.title
-                self.notch.mediaTitle = media.title
-            }
-
-            self.updateMediaDetails(media, updatePlaybackState: self.mediaPlaybackRevision == playbackRevisionAtStart)
-            self.notch.mediaIsShort = media.isShort
-            if self.notch.startupSplash && !media.isPaused {
-                self.notch.startupSplash = false
-            }
-            if !self.notch.mediaPlaying {
-                self.notch.mediaPlaying = true
-                self.resizeWindow()
-            } else if isNewVideo && self.notch.expanded {
-                self.notch.needsDisplay = true
-            }
+            let selected = mediaItems.first(where: { self.mediaKey(for: $0) == self.currentMediaKey })
+                ?? mediaItems.first
+            guard let selected else { return }
+            self.applyYouTubeSelection(selected,
+                                       updatePlaybackState: self.mediaPlaybackRevision == playbackRevisionAtStart)
         }
+    }
+
+    private func mediaKey(for media: MediaInfo) -> String {
+        "\(media.tabID):\(media.isShort ? "shorts" : "watch"):\(media.videoID)"
+    }
+
+    private func clearTrackedYouTubeSelection() {
+        currentMediaTabID = nil
+        currentMediaVideoID = ""
+        currentMediaKey = ""
+        currentMediaTitle = ""
+        currentShortSession = false
+        notch.mediaPlaying = false
+        notch.mediaPaused = true
+        notch.mediaIsShort = false
+        notch.mediaVideoCount = 0
+        notch.canSelectPreviousVideo = false
+        notch.canSelectNextVideo = false
+        notch.mediaAnyVideoPlaying = false
+        notch.mediaTitle = ""
+        notch.mediaThumbnail = nil
+        notch.mediaCurrentTime = 0
+        notch.mediaDuration = 0
+        loadedThumbnailURL = ""
+        youtubeMediaItems = []
+        notch.expanded = false
+    }
+
+    private func applyYouTubeSelection(_ media: MediaInfo, updatePlaybackState: Bool,
+                                       animatedDirection: Int? = nil) {
+        let key = mediaKey(for: media)
+        let isNewSelection = key != currentMediaKey
+        let shouldExpandForFirstTrackedVideo = !notch.mediaPlaying
+        if let animatedDirection, isNewSelection, notch.expanded {
+            notch.beginMediaPageTransition(direction: animatedDirection)
+        }
+        currentMediaTabID = media.tabID
+        currentMediaVideoID = media.videoID
+        currentMediaKey = key
+        currentShortSession = media.isShort
+        if let selectedIndex = youtubeMediaItems.firstIndex(where: { mediaKey(for: $0) == key }) {
+            notch.canSelectPreviousVideo = selectedIndex > 0
+            notch.canSelectNextVideo = selectedIndex < youtubeMediaItems.count - 1
+        } else {
+            notch.canSelectPreviousVideo = false
+            notch.canSelectNextVideo = false
+        }
+        currentMediaTitle = media.title
+        notch.mediaTitle = media.title.isEmpty ? "YouTube video" : media.title
+        notch.mediaIsShort = media.isShort
+        notch.mediaPlaying = true
+        if media.thumbnailURL != loadedThumbnailURL {
+            notch.mediaThumbnail = nil
+        }
+        updateMediaDetails(media, updatePlaybackState: updatePlaybackState)
+        // A newly detected YouTube tab must resize the existing notch around
+        // the media indicator immediately. Without this, the compact artwork
+        // can be drawn below the physical cutout while the window remains idle-sized.
+        if shouldExpandForFirstTrackedVideo {
+            resizeWindow(animated: true)
+        }
+        notch.needsDisplay = true
+    }
+
+    private func selectYouTubeVideo(direction: Int) {
+        guard youtubeMediaItems.count > 1, direction != 0 else { return }
+        let currentIndex = youtubeMediaItems.firstIndex(where: { mediaKey(for: $0) == currentMediaKey }) ?? 0
+        let nextIndex = currentIndex + direction
+        guard youtubeMediaItems.indices.contains(nextIndex) else { return }
+        applyYouTubeSelection(youtubeMediaItems[nextIndex], updatePlaybackState: true,
+                              animatedDirection: direction)
     }
 
     private func pollYouTubePlaybackState() {
@@ -4108,8 +4942,18 @@ private func animateVolumeHUD(to target: CGFloat) {
             if Date() >= self.mediaActionOverrideUntil {
                 self.notch.mediaPaused = !isPlaying
             }
-            if isPlaying && self.notch.startupSplash {
-                self.notch.startupSplash = false
+            if let selectedIndex = self.youtubeMediaItems.firstIndex(where: {
+                self.mediaKey(for: $0) == self.currentMediaKey
+            }) {
+                let old = self.youtubeMediaItems[selectedIndex]
+                self.youtubeMediaItems[selectedIndex] = MediaInfo(
+                    url: old.url, title: old.title, videoID: old.videoID,
+                    isYouTube: old.isYouTube, isWatchPage: old.isWatchPage,
+                    playing: isPlaying, isPaused: !isPlaying,
+                    currentTime: old.currentTime, duration: old.duration,
+                    thumbnailURL: old.thumbnailURL, isShort: old.isShort, tabID: old.tabID
+                )
+                self.notch.mediaAnyVideoPlaying = self.youtubeMediaItems.contains(where: \.playing)
             }
         }
     }
@@ -4145,12 +4989,22 @@ private func animateVolumeHUD(to target: CGFloat) {
         let targetWidth: CGFloat
         let targetHeight: CGFloat
 
-        if developerMode.presentation == .console {
+        if notch.startupSplash {
+            targetWidth = 260
+            targetHeight = 132
+        } else if developerMode.presentation == .console {
             targetWidth = 720
             targetHeight = 660
         } else if developerMode.presentation == .authenticating || developerMode.presentation.isDeveloperMessage {
             targetWidth = 410
             targetHeight = 168
+        } else if grassAIModel.isThinking {
+            targetWidth = idleWidth
+            targetHeight = idleHeight
+        } else if grassAIModel.isPresented && !grassAIModel.isThinking {
+            let size = grassAIModel.notchPanelSize
+            targetWidth = size.width
+            targetHeight = size.height
         } else if notch.noNetworkAlertActive {
             targetWidth = idleWidth
             targetHeight = noNetworkAlertHeight
@@ -4166,9 +5020,6 @@ private func animateVolumeHUD(to target: CGFloat) {
         } else if notch.appSwitchIcon != nil {
             targetWidth = appSwitchWidth
             targetHeight = idleHeight
-        } else if notch.startupSplash {
-            targetWidth = 260
-            targetHeight = 132
         } else if notch.incomingNotification != nil {
             targetWidth = 370
             targetHeight = 112
@@ -4185,7 +5036,7 @@ private func animateVolumeHUD(to target: CGFloat) {
                 )
             }
             targetHeight = singleMessageHeight + CGFloat(max(0, count - 1)) * messageRowHeight
-        } else if notch.volumeHUD || notch.whatsAppCallActive || notch.whatsAppInCall {
+        } else if notch.volumeHUD || notch.brightnessHUD || notch.whatsAppCallActive || notch.whatsAppInCall {
             targetWidth = activeWidth
             targetHeight = idleHeight
         } else if notch.expanded && notch.mediaPlaying {
@@ -4329,6 +5180,7 @@ private func animateVolumeHUD(to target: CGFloat) {
 
     func applicationWillTerminate(_ notification: Notification) {
         developerMode.lockDeveloperMode(reason: .applicationTerminated)
+        grassAIShortcut.invalidate()
         displaySyncTimer?.invalidate()
         displaySyncTimer = nil
         pointerAcceptanceTimer?.invalidate()

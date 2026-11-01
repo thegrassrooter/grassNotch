@@ -2,13 +2,27 @@
 
 grassNotch is a native macOS menu-bar/notch app built with Swift and SwiftUI.
 
-## NotchOS 2.5
+## NotchOS 3
+
+NotchOS 3 adds grassAI inside the existing notch. Double-tap the Command key
+to open the compact assistant without clicking. The notch prompt is available
+immediately without a grassAI account sign-in; prompts and follow-ups use the
+server-side `grassNotchChat` action and the existing grass1 model. Keep the
+Groq API key in Apps Script Script Properties; never put it in this app. The
+updated Apps Script source is in `grassAI-backend/Code.gs` and must be deployed
+to the existing web app before this client action is available. System-wide
+key monitoring requires Accessibility access; without it, the shortcut works
+while grassNotch is active. The assistant keeps its conversation in memory
+while the app is running. Click the top grabber or press Escape to close
+grassAI; the notch returns to its current live state. The Developer Console
+remains separate and blocks grassAI while it is open.
 
 This release improves source builds on Macs with multiple installed Swift
 toolchains. Use Apple's toolchain that matches the selected Xcode or Command
 Line Tools SDK; mixing a separately installed Swift 6.4.1 toolchain with a
 different SDK can fail while scanning system modules such as CoreMIDI, XPC,
-and IOKit. The app reports version 2.5 in its packaged bundle and startup view.
+and IOKit. The app reports version 3.0 in its packaged bundle and NotchOS 3 in
+its startup view.
 The authenticated Developer Console includes a persistent switch for hiding
 or showing the orange moving bars in the compact YouTube status without
 disabling playback, the YouTube logo, or its controls.

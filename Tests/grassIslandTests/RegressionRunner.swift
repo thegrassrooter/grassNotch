@@ -6,6 +6,32 @@ import Darwin
 struct GrassIslandRegressionRunner {
     static func main() async {
         var failures: [String] = []
+        run("grassAI HTML answers format headings and lists without raw tags or Markdown markers", failures: &failures) {
+            let raw = "Yes – I’m familiar with <b>HTX Studio</b><b>Aspect</b><b>What it is</b><br><b>Typical Use-Cases</b><br><b>Product type</b>A desktop-based multimedia creation suite<br>• Quick-turn video editing <br>• Audio post-production (mixing, mastering)"
+            let answer = GrassAIAnswerFormatter.format(raw)
+            return answer.contains("HTX Studio")
+                && answer.contains("Aspect:")
+                && answer.contains("What it is:")
+                && answer.contains("Typical Use-Cases:")
+                && answer.contains("Product type:")
+                && answer.contains("A desktop-based multimedia creation suite.")
+                && answer.contains("• Quick-turn video editing.")
+                && !answer.contains("<br>")
+                && !answer.contains("*")
+        }
+
+        run("grassAI malformed concatenated Markdown gains word spacing and punctuation", failures: &failures) {
+            let raw = "**StudioAspectWhatItIs**A desktop-based suite<br>* Quick-turn editing<br>* Audio mixing<br>YouTube and macOS are supported"
+            let answer = GrassAIAnswerFormatter.format(raw)
+            return answer.contains("Studio Aspect What It Is:")
+                && answer.contains("A desktop-based suite.")
+                && answer.contains("• Quick-turn editing.")
+                && answer.contains("• Audio mixing.")
+                && answer.contains("YouTube and macOS are supported.")
+                && !answer.contains("*")
+                && !answer.contains("<br>")
+        }
+
         run("Gmail parser preserves recipient and message details", failures: &failures) {
             let payload = #"{"account":"me@example.com","inboxVisible":true,"messages":[{"sender":"Ada Lovelace","senderEmail":"ada@example.org","subject":"Build report","preview":"The report is ready","fingerprint":"me::ada::report","sourceURL":"https://mail.google.com/mail/u/0/#inbox/thread-1"}]}"#
             guard let scan = GmailMonitor.parseOutput(payload),
@@ -385,7 +411,7 @@ struct GrassIslandRegressionRunner {
             print("FAIL: app-switch view draws a larger icon in the left wing without a backing badge")
         }
 
-        print("Regression cases: 25 total, \(25 - failures.count) passed, \(failures.count) failed")
+        print("Regression cases: 27 total, \(27 - failures.count) passed, \(failures.count) failed")
         if !failures.isEmpty {
             for failure in failures { print("FAILED: \(failure)") }
             exit(EXIT_FAILURE)

@@ -6,6 +6,7 @@ trap 'rm -rf "$test_dir"' EXIT
 
 swiftc -D GRASS_ISLAND_REGRESSION \
   Sources/grassIsland/DeveloperMode.swift \
+  Sources/grassIsland/GrassAI.swift \
   Sources/grassIsland/InboxNotifications.swift \
   Sources/grassIsland/grassIsland.swift \
   Tests/grassIslandTests/RegressionRunner.swift \

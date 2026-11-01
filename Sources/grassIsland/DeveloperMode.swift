@@ -8,6 +8,12 @@ import LocalAuthentication
 import SwiftUI
 import UserNotifications
 
+enum NotchOSRelease {
+    // Keep the user-facing release label in one place for the startup mark and
+    // the authenticated Developer Console.
+    static let version = "NotchOS 3"
+}
+
 enum DeveloperModePresentation: Equatable {
     case closed
     case authenticating
@@ -402,8 +408,7 @@ enum DeveloperPermissionReader {
         return [
             DeveloperPermission(id: "notifications", name: "Notifications", status: notificationStatus, explanation: "macOS notification delivery for Gmail and WhatsApp alerts."),
             DeveloperPermission(id: "focus", name: "Focus status", status: focusStatus, explanation: "Reads the app-visible Focus availability state; macOS does not expose the active Focus name here."),
-            DeveloperPermission(id: "accessibility", name: "Accessibility", status: AXIsProcessTrusted() ? "Allowed" : "Not granted", explanation: "Required only for accessibility integrations used by the app."),
-            DeveloperPermission(id: "screen-recording", name: "Screen recording", status: CGPreflightScreenCaptureAccess() ? "Allowed" : "Not granted", explanation: "No screen capture is initiated by Developer Mode."),
+            DeveloperPermission(id: "accessibility", name: "Accessibility", status: AXIsProcessTrusted() ? "Allowed" : "Not granted", explanation: "Required for the system-wide double-Command grassAI shortcut. Without it, the shortcut is detected only while grassNotch is active."),
             DeveloperPermission(id: "microphone", name: "Microphone", status: AVCaptureDevice.authorizationStatus(for: .audio).developerLabel, explanation: "The current app does not capture microphone audio."),
             DeveloperPermission(id: "automation", name: "Automation", status: "Per-app", explanation: "macOS authorizes Apple Events separately for each target app when the feature uses it."),
             DeveloperPermission(id: "bluetooth", name: "Bluetooth status", status: InboxNotifications.hasApplicationBundle ? (IOBluetoothHostController.default() == nil ? "Unavailable" : "Available") : "Requires packaged app", explanation: "Used to observe Bluetooth power state changes."),
@@ -603,6 +608,7 @@ struct DeveloperConsoleView: View {
     private var systemOverview: some View {
         section("SYSTEM", symbol: "desktopcomputer") {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 9) {
+                metric("NotchOS", NotchOSRelease.version)
                 metric("grassNotch", "v\(model.snapshot.version) · build \(model.snapshot.build)")
                 metric("macOS", model.snapshot.macOS)
                 metric("Architecture", model.snapshot.architecture)
@@ -830,6 +836,7 @@ struct DeveloperConsoleView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let report = """
         grassNotch Developer Diagnostic
+        NotchOS: \(NotchOSRelease.version)
         Version: \(model.snapshot.version) (\(model.snapshot.build))
         System: \(model.snapshot.macOS)
         Architecture: \(model.snapshot.architecture)
@@ -846,7 +853,7 @@ struct DeveloperConsoleView: View {
     }
 
     private func copyEnvironment() {
-        let text = "grassNotch v\(model.snapshot.version) build \(model.snapshot.build) · \(model.snapshot.macOS) · \(model.snapshot.architecture) · memory \(formattedBytes(model.snapshot.memoryBytes))"
+        let text = "\(NotchOSRelease.version) · grassNotch v\(model.snapshot.version) build \(model.snapshot.build) · \(model.snapshot.macOS) · \(model.snapshot.architecture) · memory \(formattedBytes(model.snapshot.memoryBytes))"
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
