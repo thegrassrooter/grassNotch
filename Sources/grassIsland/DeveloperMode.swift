@@ -9,9 +9,8 @@ import SwiftUI
 import UserNotifications
 
 enum NotchOSRelease {
-    // Keep the user-facing release label in one place for the startup mark and
-    // the authenticated Developer Console.
-    static let version = "NotchOS 3"
+    // Keep the release label shared by startup and Notch Settings.
+    static let version = "NotchOS 4"
 }
 
 enum DeveloperModePresentation: Equatable {
@@ -224,7 +223,7 @@ final class DeveloperModeManager: ObservableObject {
                   self.presentation == .authenticating else { return }
             context.evaluatePolicy(
                 .deviceOwnerAuthenticationWithBiometrics,
-                localizedReason: "Authenticate to open the Developer Console."
+                localizedReason: "Authenticate to open Notch Settings."
             ) { [weak self] success, error in
                 Task { @MainActor [weak self] in
                     guard let self, self.requestID == request,
@@ -441,10 +440,10 @@ struct DeveloperOverlayRoot: View {
         Group {
             switch manager.presentation {
             case .authenticating:
-                authenticationCard(title: "Developer Mode", subtitle: "Authenticate with Touch ID to continue.", symbol: "touchid", showsProgress: true)
+                authenticationCard(title: "Notch Settings", subtitle: "Authenticate with Touch ID to continue.", symbol: "touchid", showsProgress: true)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             case .message(let message):
-                authenticationCard(title: "Developer Mode", subtitle: message, symbol: "touchid", showsProgress: false)
+                authenticationCard(title: "Notch Settings", subtitle: message, symbol: "touchid", showsProgress: false)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             case .console:
                 DeveloperConsoleView(
@@ -464,15 +463,7 @@ struct DeveloperOverlayRoot: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Fill the entire panel with black so the auth surface grows out of
         // the physical notch without a grey card, inset seam, or outline.
-        .background(Color(red: 0, green: 0, blue: 0, opacity: 1), in: UnevenRoundedRectangle(
-            cornerRadii: RectangleCornerRadii(
-                topLeading: 0,
-                bottomLeading: 24,
-                bottomTrailing: 24,
-                topTrailing: 0
-            ),
-            style: .continuous
-        ))
+        .background(Color.black, in: NotchContourShape(bottomCornerRadius: 24))
         // NSHostingView inherits the MacBook display's top safe area. This
         // panel is already positioned at the physical screen edge, so let the
         // developer surface fill that area instead of starting below it.
@@ -586,7 +577,7 @@ struct DeveloperConsoleView: View {
                 .frame(width: 30, height: 30)
                 .background(.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
             VStack(alignment: .leading, spacing: 2) {
-                Text("Developer Console").font(.system(size: 14, weight: .semibold))
+                Text("Notch Settings").font(.system(size: 14, weight: .semibold))
                 Text("grassNotch · authenticated session")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
@@ -598,7 +589,7 @@ struct DeveloperConsoleView: View {
             }
             .buttonStyle(.plain)
             .background(.white.opacity(0.08), in: Circle())
-            .help("Close console (Option–Shift–click the notch)")
+            .help("Close Notch Settings (Option–Shift–click the notch)")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

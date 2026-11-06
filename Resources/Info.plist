@@ -12,14 +12,21 @@
 	<string>Dynamic Notch uses your Focus status to briefly show when Do Not Disturb or another Focus mode changes.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Dynamic Notch checks Bluetooth power changes to briefly show the Bluetooth status in the notch.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>grassNotch uses your local network to discover and connect to your Android phone through Wireless debugging.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_adb-tls-connect._tcp</string>
+		<string>_adb-tls-pairing._tcp</string>
+	</array>
 	<key>NSFaceIDUsageDescription</key>
-	<string>grassNotch uses macOS biometric authentication to protect the Developer Console.</string>
+	<string>grassNotch uses macOS biometric authentication to protect Notch Settings.</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>
-	<string>30</string>
+	<string>40</string>
 	<key>CFBundleShortVersionString</key>
-	<string>3.0</string>
+	<string>4.0</string>
 	<key>CFBundleIconFile</key>
 	<string>grassIsland.icns</string>
 	<key>LSMinimumSystemVersion</key>

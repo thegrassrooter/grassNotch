@@ -6,6 +6,44 @@ import Darwin
 struct GrassIslandRegressionRunner {
     static func main() async {
         var failures: [String] = []
+        run("grassMenu utilities register the four standalone apps", failures: &failures) {
+            GrassUtilityApp.allCases.map(\.title) == ["Calculator", "Timer", "Stopwatch", "Notes"]
+        }
+
+        run("calculator handles arithmetic, chaining, percentages, sign, delete, and division by zero", failures: &failures) {
+            let calculator = CalculatorModel()
+            ["8", "÷", "2", "=", "+", "3", "="].forEach(calculator.input)
+            let chained = calculator.display == "7"
+            calculator.clear()
+            ["5", "0", "%"].forEach(calculator.input)
+            let percentage = calculator.display == "0.5"
+            calculator.input("±")
+            let sign = calculator.display == "-0.5"
+            calculator.input("⌫")
+            let deletion = calculator.display == "-0."
+            calculator.clear()
+            ["7", "÷", "0", "="].forEach(calculator.input)
+            return chained && percentage && sign && deletion && calculator.display == "Error"
+        }
+
+        run("notes persist independently per storage root and flush pending edits", failures: &failures) {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("grassNotch-notes-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let firstStore = NotesStore(storageRoot: root.appendingPathComponent("user-one"))
+            let noteID = firstStore.createNote()
+            firstStore.update(noteID, title: "Launch plan", content: "Ship carefully")
+            firstStore.flushPendingSaves()
+            let secondStore = NotesStore(storageRoot: root.appendingPathComponent("user-two"))
+            let reloadedStore = NotesStore(storageRoot: root.appendingPathComponent("user-one"))
+            let persisted = reloadedStore.notes.first(where: { $0.id == noteID })
+            return firstStore.notes.count == 1
+                && secondStore.notes.isEmpty
+                && persisted?.title == "Launch plan"
+                && persisted?.content == "Ship carefully"
+                && persisted?.createdAt != nil
+                && persisted?.modifiedAt != nil
+        }
+
         run("grassAI HTML answers format headings and lists without raw tags or Markdown markers", failures: &failures) {
             let raw = "Yes – I’m familiar with <b>HTX Studio</b><b>Aspect</b><b>What it is</b><br><b>Typical Use-Cases</b><br><b>Product type</b>A desktop-based multimedia creation suite<br>• Quick-turn video editing <br>• Audio post-production (mixing, mastering)"
             let answer = GrassAIAnswerFormatter.format(raw)
@@ -411,7 +449,7 @@ struct GrassIslandRegressionRunner {
             print("FAIL: app-switch view draws a larger icon in the left wing without a backing badge")
         }
 
-        print("Regression cases: 27 total, \(27 - failures.count) passed, \(failures.count) failed")
+        print("Regression cases: 29 total, \(29 - failures.count) passed, \(failures.count) failed")
         if !failures.isEmpty {
             for failure in failures { print("FAILED: \(failure)") }
             exit(EXIT_FAILURE)

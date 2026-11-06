@@ -2,9 +2,18 @@
 
 grassNotch is a native macOS menu-bar/notch app built with Swift and SwiftUI.
 
-## NotchOS 3
+Explore the release story at [grassNotch — NotchOS](https://thegrassrooter.github.io/grassNotch-site/). The site's source lives in the companion [grassNotch-site repository](https://github.com/thegrassrooter/grassNotch-site).
 
-NotchOS 3 adds grassAI inside the existing notch. Double-tap the Command key
+## NotchOS 4
+
+NotchOS 4 introduces grassMenu. Option-click the notch to open its compact,
+scrollable icon grid; Notch Settings is the first item. Settings are organized
+in the existing protected panel and remain Touch ID authenticated. Closing
+settings returns to grassMenu. The startup screen and settings show NotchOS 4.
+Clicks on the notch are handled by grassNotch instead of passing through to
+the app behind it.
+
+NotchOS 3 added grassAI inside the existing notch. Double-tap the Command key
 to open the compact assistant without clicking. The notch prompt is available
 immediately without a grassAI account sign-in; prompts and follow-ups use the
 server-side `grassNotchChat` action and the existing grass1 model. Keep the
@@ -14,16 +23,16 @@ to the existing web app before this client action is available. System-wide
 key monitoring requires Accessibility access; without it, the shortcut works
 while grassNotch is active. The assistant keeps its conversation in memory
 while the app is running. Click the top grabber or press Escape to close
-grassAI; the notch returns to its current live state. The Developer Console
-remains separate and blocks grassAI while it is open.
+grassAI; the notch returns to its current live state. Notch Settings stays
+separate and blocks grassAI while it is open.
 
 This release improves source builds on Macs with multiple installed Swift
 toolchains. Use Apple's toolchain that matches the selected Xcode or Command
 Line Tools SDK; mixing a separately installed Swift 6.4.1 toolchain with a
 different SDK can fail while scanning system modules such as CoreMIDI, XPC,
-and IOKit. The app reports version 3.0 in its packaged bundle and NotchOS 3 in
-its startup view.
-The authenticated Developer Console includes a persistent switch for hiding
+and IOKit. The app reports version 4.0 in its packaged bundle and NotchOS 4 in
+its startup view and Notch Settings.
+Notch Settings includes a persistent switch for hiding
 or showing the orange moving bars in the compact YouTube status without
 disabling playback, the YouTube logo, or its controls.
 
@@ -56,7 +65,7 @@ independently installed Swift toolchain with a different Apple SDK.
    open .build/out/Products/Debug/grassIsland.app
    ```
 
-The packaged app includes the bundle metadata required for Touch ID, Notification Center, Focus, and Bluetooth integration. Touch ID requires a Mac with Touch ID enabled and enrolled. Developer Mode always starts locked and uses macOS LocalAuthentication; it does not store authentication between launches.
+The packaged app includes the bundle metadata required for Touch ID, Notification Center, Focus, and Bluetooth integration. Touch ID requires a Mac with Touch ID enabled and enrolled. Notch Settings always starts locked and uses macOS LocalAuthentication; it does not store authentication between launches.
 
 macOS may ask for Automation or Accessibility access for features that inspect or control other apps. Running `swift run` launches an unbundled SwiftPM executable and does not provide the app-bundle integrations above.
 

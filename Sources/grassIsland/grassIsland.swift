@@ -130,7 +130,13 @@ struct CaptureActivityState: Equatable, Sendable {
     }
 
     static func compactMediaWidth(for state: CaptureActivityState, baseWidth: CGFloat = 360) -> CGFloat {
-        baseWidth + CGFloat(state.activeCount) * 32
+        baseWidth + CGFloat(state.activeCount) * 28
+    }
+
+    static func compactYouTubeWidth(for state: CaptureActivityState, videoCount: Int) -> CGFloat {
+        let baseWidth: CGFloat = videoCount > 1 ? 302 : 270
+        let captureAllowance: CGFloat = 48
+        return baseWidth + CGFloat(state.activeCount) * captureAllowance
     }
 }
 
@@ -660,6 +666,9 @@ enum ChromeYouTube {
         case "seek":
             let safe = max(-3600, min(3600, seekSeconds))
             js = "(() => { const shortVideo = document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video'); const v = shortVideo || document.querySelector('video.html5-main-video') || Array.from(document.querySelectorAll('video')).find(x => !x.paused && !x.ended) || document.querySelector('video'); if (!v) return 'NO_VIDEO'; const next = Math.max(0, Math.min(Number.isFinite(v.duration) ? v.duration : Infinity, v.currentTime + (\(safe)))); try { v.currentTime = next; } catch (_) {} v.dispatchEvent(new Event('seeking')); return 'SEEK'; })()"
+        case "seekTo":
+            let safe = max(0, min(86_400, seekSeconds))
+            js = "(() => { const shortPage = location.pathname.startsWith('/shorts/'); const player = document.getElementById('movie_player'); const shortVideo = shortPage ? (document.querySelector('ytd-reel-video-renderer[is-active] video') || document.querySelector('ytd-shorts video') || document.querySelector('#shorts-player video')) : null; const v = shortVideo || player?.querySelector('video.html5-main-video') || document.querySelector('video.html5-main-video') || document.querySelector('video'); if (!v) return 'NO_VIDEO'; const next = Math.max(0, Math.min(Number.isFinite(v.duration) ? v.duration : Infinity, \(safe))); try { v.currentTime = next; } catch (_) {} v.dispatchEvent(new Event('seeking')); return 'SEEK_TO'; })()"
         default:
             return
         }
@@ -1234,6 +1243,7 @@ final class NotchView: NSView {
     private var mediaCountTransitionTimer: Timer?
     private var mediaCountTransitionStartedAt: CFTimeInterval = 0
     private var mediaCountTransitionProgress: CGFloat = 1
+    private var isScrubbingMedia = false
     var mediaCurrentTime: Double = 0 { didSet { needsDisplay = true } }
     var mediaDuration: Double = 0 { didSet { needsDisplay = true } }
     var mediaThumbnail: NSImage? { didSet { needsDisplay = true } }
@@ -1242,6 +1252,7 @@ final class NotchView: NSView {
     var startupSplash = false { didSet { needsDisplay = true } }
     var grassAIPresented = false { didSet { needsDisplay = true } }
     var grassAIThinking = false { didSet { needsDisplay = true } }
+    var grassMenuPresented = false { didSet { needsDisplay = true } }
 
     var appSwitchIcon: NSImage? { didSet { needsDisplay = true } }
     var appSwitchOpacity: CGFloat = 0 { didSet { needsDisplay = true } }
@@ -1277,13 +1288,14 @@ final class NotchView: NSView {
     var whatsAppOverflowCount = 0 { didSet { needsDisplay = true } }
 
     var onToggleExpanded: (@MainActor () -> Void)?
-    var onDeveloperModeClick: (@MainActor (_ shiftHeld: Bool) -> Void)?
+    var onGrassMenuOptionClick: (@MainActor () -> Void)?
     var onControlClickGrassAI: (@MainActor () -> Void)?
     var onAcceptWhatsAppCall: (@MainActor () -> Void)?
     var onDeclineWhatsAppCall: (@MainActor () -> Void)?
     var onToggleWhatsAppMute: (@MainActor () -> Void)?
     var onMediaPlayPause: (@MainActor () -> Void)?
     var onMediaSeek: (@MainActor (Double) -> Void)?
+    var onMediaSeekTo: (@MainActor (Double) -> Void)?
     var onMediaSelectVideo: (@MainActor (Int) -> Void)?
     var onClearIncomingMessages: (@MainActor () -> Void)?
     var onMirrorToggleExpanded: (@MainActor () -> Void)?
@@ -1312,6 +1324,7 @@ final class NotchView: NSView {
         if startupSplash != source.startupSplash { startupSplash = source.startupSplash }
         if grassAIPresented != source.grassAIPresented { grassAIPresented = source.grassAIPresented }
         if grassAIThinking != source.grassAIThinking { grassAIThinking = source.grassAIThinking }
+        if grassMenuPresented != source.grassMenuPresented { grassMenuPresented = source.grassMenuPresented }
         if appSwitchIcon !== source.appSwitchIcon { appSwitchIcon = source.appSwitchIcon }
         if appSwitchOpacity != source.appSwitchOpacity { appSwitchOpacity = source.appSwitchOpacity }
         if currentAppIcon !== source.currentAppIcon { currentAppIcon = source.currentAppIcon }
@@ -1351,12 +1364,22 @@ final class NotchView: NSView {
         // grassAI controls live below and beside the physical notch. Let the
         // hosting view receive pointer events across the expanded panel; the
         // usual notch-shaped hit area is restored as soon as it closes.
-        if grassAIPresented, bounds.contains(localPoint) {
-            return super.hitTest(point)
+        if (grassAIPresented || grassMenuPresented), bounds.contains(localPoint) {
+            return super.hitTest(point) ?? self
         }
+        let logicalPoint = NSPoint(x: localPoint.x - Self.upperCornerBleed, y: localPoint.y)
+        let logicalBounds = NSRect(
+            x: 0,
+            y: bounds.minY,
+            width: max(0, bounds.width - Self.upperCornerBleed * 2),
+            height: bounds.height
+        )
         guard Self.shouldReceivePointer(at: localPoint, in: bounds),
-              notchPath(in: bounds).contains(localPoint) else { return nil }
-        return super.hitTest(point)
+              notchPath(in: logicalBounds).contains(logicalPoint) else { return nil }
+        // A transparent or non-key notch panel must still consume the click
+        // over its visible surface; otherwise AppKit can deliver the same
+        // click to the app window underneath it.
+        return super.hitTest(point) ?? self
     }
 
     static func shouldReceivePointer(at point: NSPoint, in bounds: NSRect) -> Bool {
@@ -1380,13 +1403,14 @@ final class NotchView: NSView {
     }
 
     func shouldAcceptPointer(at point: NSPoint) -> Bool {
-        if grassAIPresented { return bounds.contains(point) }
+        if grassAIPresented || grassMenuPresented { return bounds.contains(point) }
         var extraTargets: [NSRect] = []
         if incomingNotification != nil { extraTargets.append(clearAllRect(in: bounds)) }
         if mediaPlaying && expanded {
             extraTargets.append(Self.mediaPlayControlRect(in: bounds))
             extraTargets.append(Self.mediaBackControlRect(in: bounds))
             extraTargets.append(Self.mediaForwardControlRect(in: bounds))
+            extraTargets.append(Self.mediaProgressInteractionRect(in: bounds))
             if mediaVideoCount > 1 {
                 if canSelectPreviousVideo { extraTargets.append(Self.mediaPreviousVideoRect(in: bounds)) }
                 if canSelectNextVideo { extraTargets.append(Self.mediaNextVideoRect(in: bounds)) }
@@ -1412,23 +1436,37 @@ final class NotchView: NSView {
         in bounds: NSRect,
         cornerRadius: CGFloat = 18
     ) -> NSBezierPath {
-        // Keep the top edge square and flush with the physical display edge.
-        // Only the lower corners round as the notch body expands downward.
+        // The top edge extends a little beyond each straight side wall, then
+        // curves smoothly back into it. This makes the upper corners convex
+        // toward the display edge instead of cutting inward like a capsule.
         let r = min(cornerRadius, min(bounds.width / 2, bounds.height / 2))
+        let left = bounds.minX
+        let right = bounds.maxX
+        let topRadius = min(10, min(bounds.width / 2, bounds.height / 2))
         let path = NSBezierPath()
-        path.move(to: NSPoint(x: 0, y: bounds.height))
-        path.line(to: NSPoint(x: bounds.width, y: bounds.height))
-        path.line(to: NSPoint(x: bounds.width, y: r))
+        path.move(to: NSPoint(x: left - topRadius, y: bounds.height))
         path.curve(
-            to: NSPoint(x: bounds.width - r, y: 0),
-            controlPoint1: NSPoint(x: bounds.width, y: r * 0.42),
-            controlPoint2: NSPoint(x: bounds.width - r * 0.42, y: 0)
+            to: NSPoint(x: left, y: bounds.height - topRadius),
+            controlPoint1: NSPoint(x: left - topRadius * 0.45, y: bounds.height),
+            controlPoint2: NSPoint(x: left, y: bounds.height - topRadius * 0.45)
         )
-        path.line(to: NSPoint(x: r, y: 0))
+        path.line(to: NSPoint(x: left, y: r))
         path.curve(
-            to: NSPoint(x: 0, y: r),
-            controlPoint1: NSPoint(x: r * 0.42, y: 0),
-            controlPoint2: NSPoint(x: 0, y: r * 0.42)
+            to: NSPoint(x: left + r, y: 0),
+            controlPoint1: NSPoint(x: left, y: r * 0.42),
+            controlPoint2: NSPoint(x: left + r * 0.42, y: 0)
+        )
+        path.line(to: NSPoint(x: right - r, y: 0))
+        path.curve(
+            to: NSPoint(x: right, y: r),
+            controlPoint1: NSPoint(x: right - r * 0.42, y: 0),
+            controlPoint2: NSPoint(x: right, y: r * 0.42)
+        )
+        path.line(to: NSPoint(x: right, y: bounds.height - topRadius))
+        path.curve(
+            to: NSPoint(x: right + topRadius, y: bounds.height),
+            controlPoint1: NSPoint(x: right, y: bounds.height - topRadius * 0.45),
+            controlPoint2: NSPoint(x: right + topRadius * 0.45, y: bounds.height)
         )
         path.close()
         return path
@@ -1464,14 +1502,31 @@ final class NotchView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        drawNotchContents(dirtyRect)
+    }
+
+    private func drawNotchContents(_ dirtyRect: NSRect) {
         let context = NSGraphicsContext.current?.cgContext
-        let bounds = self.bounds
+        context?.saveGState()
+        context?.translateBy(x: Self.upperCornerBleed, y: 0)
+        defer { context?.restoreGState() }
+        let bounds = NSRect(
+            x: 0,
+            y: self.bounds.minY,
+            width: max(0, self.bounds.width - Self.upperCornerBleed * 2),
+            height: self.bounds.height
+        )
 
         // The launch mark owns the first three seconds. System activity may
         // update underneath it, but cannot replace or shorten the splash.
         if startupSplash {
             fillPitchBlack(notchPath(in: bounds))
             drawStartupLogo(in: bounds)
+            return
+        }
+
+        if grassMenuPresented {
+            fillPitchBlack(notchPath(in: bounds, cornerRadius: 22))
             return
         }
 
@@ -1610,6 +1665,7 @@ final class NotchView: NSView {
             drawCaptureIndicators(in: bounds, expandedMedia: expanded && mediaPlaying)
         }
     }
+
 
     private func drawNoNetworkAlert(in bounds: NSRect) {
         fillPitchBlack(notchPath(in: bounds, cornerRadius: 22))
@@ -1798,12 +1854,15 @@ final class NotchView: NSView {
         max(34, safeAreaTop)
     }
 
+    static let upperCornerBleed: CGFloat = 10
+
     static func notchFrame(in displayFrame: NSRect, width: CGFloat, height: CGFloat) -> NSRect {
-        NSRect(
-            x: displayFrame.midX - width / 2,
+        let panelWidth = width + upperCornerBleed * 2
+        return NSRect(
+            x: displayFrame.midX - panelWidth / 2,
             y: displayFrame.maxY - height,
-            width: width,
-            height: height
+            width: panelWidth,
+            height: height + 1
         )
     }
 
@@ -1864,32 +1923,7 @@ final class NotchView: NSView {
     // The top remains flush with the physical screen edge; only the lower body grows.
     private func drawConnectedWhatsAppCard(in bounds: NSRect) {
         let width = bounds.width
-        let height = bounds.height
-        // Dynamic Notch silhouette: the entire top edge is a perfectly
-        // straight, full-width edge so the black shape blends into the
-        // MacBook's top screen border. Only the bottom corners are rounded.
-        let bottomRadius: CGFloat = 18
-        let path = NSBezierPath()
-
-        // Flush, square top edge: this is the part that must merge into the
-        // display's top border. Do not round or inset either top corner.
-        path.move(to: NSPoint(x: 0, y: height))
-        path.line(to: NSPoint(x: width, y: height))
-        path.line(to: NSPoint(x: width, y: bottomRadius))
-        path.curve(
-            to: NSPoint(x: width - bottomRadius, y: 0),
-            controlPoint1: NSPoint(x: width, y: bottomRadius * 0.42),
-            controlPoint2: NSPoint(x: width - bottomRadius * 0.42, y: 0)
-        )
-        path.line(to: NSPoint(x: bottomRadius, y: 0))
-        path.curve(
-            to: NSPoint(x: 0, y: bottomRadius),
-            controlPoint1: NSPoint(x: bottomRadius * 0.42, y: 0),
-            controlPoint2: NSPoint(x: 0, y: bottomRadius * 0.42)
-        )
-        path.line(to: NSPoint(x: 0, y: height))
-        path.close()
-        fillPitchBlack(path)
+        fillPitchBlack(notchPath(in: bounds, cornerRadius: 18))
 
         let messages = Array(whatsAppMessages.prefix(4))
         guard !messages.isEmpty else { return }
@@ -2224,7 +2258,7 @@ final class NotchView: NSView {
             let barWidth: CGFloat = 3
             let gap: CGFloat = 3
             let total = 4 * barWidth + 3 * gap
-            let startX = bounds.maxX - total - 16
+            let startX = bounds.maxX - total - 10
             let wave = abs(sin(CACurrentMediaTime() * 5.0 + Double(index) * 0.85))
             let barHeight = CGFloat(4 + wave * 11)
             NSColor.systemOrange.setFill()
@@ -2407,6 +2441,12 @@ final class NotchView: NSView {
                                              height: progressRect.height),
                          xRadius: progressRect.height / 2, yRadius: progressRect.height / 2).fill()
         }
+        if page.duration > 0 {
+            let thumbX = progressRect.minX + progressRect.width * ratio
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: NSRect(x: thumbX - 4, y: progressRect.midY - 4,
+                                        width: 8, height: 8)).fill()
+        }
         let timelineFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
         let timelineColor = NSColor(white: 0.64, alpha: 1)
         NSAttributedString(string: mediaTime(page.currentTime), attributes: [
@@ -2557,6 +2597,10 @@ final class NotchView: NSView {
 
     static func mediaProgressRect(in bounds: NSRect) -> NSRect {
         NSRect(x: 60, y: 80, width: max(0, bounds.width - 120), height: 7)
+    }
+
+    static func mediaProgressInteractionRect(in bounds: NSRect) -> NSRect {
+        mediaProgressRect(in: bounds).insetBy(dx: -8, dy: -10)
     }
 
     static func mediaBackControlRect(in bounds: NSRect) -> NSRect {
@@ -2747,12 +2791,21 @@ final class NotchView: NSView {
         if grassAIThinking { return }
 
         if event.modifierFlags.contains(.option) {
-            onDeveloperModeClick?(event.modifierFlags.contains(.shift))
+            onGrassMenuOptionClick?()
             return
         }
 
+        if grassMenuPresented { return }
+
         if event.modifierFlags.contains(.control) {
             onControlClickGrassAI?()
+            return
+        }
+
+        if mediaPlaying && expanded,
+           Self.mediaProgressInteractionRect(in: bounds).contains(loc) {
+            isScrubbingMedia = true
+            updateMediaScrub(at: loc, commit: false)
             return
         }
 
@@ -2852,6 +2905,26 @@ final class NotchView: NSView {
         needsDisplay = true
     }
 
+    override func mouseDragged(with event: NSEvent) {
+        guard isScrubbingMedia else { super.mouseDragged(with: event); return }
+        updateMediaScrub(at: convert(event.locationInWindow, from: nil), commit: false)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isScrubbingMedia else { super.mouseUp(with: event); return }
+        updateMediaScrub(at: convert(event.locationInWindow, from: nil), commit: true)
+        isScrubbingMedia = false
+    }
+
+    private func updateMediaScrub(at point: NSPoint, commit: Bool) {
+        guard mediaDuration.isFinite, mediaDuration > 0 else { return }
+        let track = Self.mediaProgressRect(in: bounds)
+        let ratio = min(1, max(0, (point.x - track.minX) / max(1, track.width)))
+        let target = mediaDuration * Double(ratio)
+        mediaCurrentTime = target
+        if commit { onMediaSeekTo?(target) }
+    }
+
 }
 
 // MARK: - App
@@ -2862,13 +2935,15 @@ private final class MirroredNotchDisplay {
     let panel: NSPanel
     let view: NotchView
     let grassAIHost: GrassAIHostingView
+    let grassMenuHost: GrassMenuHostingView
     let developerHost: DeveloperHostingView
 
-    init(displayID: UInt32, panel: NSPanel, view: NotchView, grassAIHost: GrassAIHostingView, developerHost: DeveloperHostingView) {
+    init(displayID: UInt32, panel: NSPanel, view: NotchView, grassAIHost: GrassAIHostingView, grassMenuHost: GrassMenuHostingView, developerHost: DeveloperHostingView) {
         self.displayID = displayID
         self.panel = panel
         self.view = view
         self.grassAIHost = grassAIHost
+        self.grassMenuHost = grassMenuHost
         self.developerHost = developerHost
     }
 }
@@ -2877,11 +2952,18 @@ private final class MirroredNotchDisplay {
 /// become key when grassAI or Developer Controls temporarily remove that style
 /// so embedded text fields and authentication UI can receive keyboard input.
 private final class InteractiveNotchPanel: NSPanel {
+    var onCalculatorKeyDown: ((NSEvent) -> Bool)?
+
     override var canBecomeKey: Bool {
         !styleMask.contains(.nonactivatingPanel)
     }
 
     override var canBecomeMain: Bool { false }
+
+    override func keyDown(with event: NSEvent) {
+        if onCalculatorKeyDown?(event) == true { return }
+        super.keyDown(with: event)
+    }
 }
 
 private struct CommandKeySample {
@@ -3032,14 +3114,20 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var notch: NotchView!
     private var mirroredNotches: [UInt32: MirroredNotchDisplay] = [:]
     private var displaySyncTimer: Timer?
-    private var pointerAcceptanceTimer: Timer?
     private let developerMode = DeveloperModeManager()
+    private let grassMenuModel = GrassMenuModel()
+    private let grassUtilities = GrassUtilitiesModel()
+    private let liveActivityIslandController = GrassLiveActivityIslandController()
+    private let phoneMirrorManager = PhoneMirrorManager()
     private let grassAIModel = GrassAIModel()
     private let grassAIEdgeGlow = GrassAIEdgeGlowController()
     private let grassAIThinkingOrb = GrassAIThinkingOrbController()
     private let grassAIShortcut = CommandDoubleTapMonitor()
     private var grassAIHost: GrassAIHostingView?
+    private var grassMenuHost: GrassMenuHostingView?
+    private var detachedIslandController: DetachableIslandController?
     private var developerHost: DeveloperHostingView?
+    private var returnToGrassMenuAfterSettings = false
     private var developerSessionObservers: [NSObjectProtocol] = []
     private var lastDeveloperPermissionStates: [String: String] = [:]
     private var incomingNotificationQueue: [InboxMessage] = []
@@ -3071,7 +3159,9 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     private var lastBatteryPercent: Int?
     private var lastBluetoothPoweredOn: Bool?
     private var lastBluetoothNotificationAt: CFTimeInterval = 0
+    private var bluetoothPollInProgress = false
     private var captureActivityCheckInProgress = false
+    private var pendingTimerCompletionPresentation = false
     private var pendingMicrophoneActiveSamples = 0
     private var latestSystemCaptureState = CaptureActivityState()
     private var latestMeetingCaptureState: CaptureActivityState?
@@ -3151,19 +3241,27 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         InboxNotifications.configure()
 
-        let frame = NSRect(
-            x: screen.frame.midX - idleWidth / 2,
-            y: screen.frame.maxY - idleHeight,
+        let frame = NotchView.notchFrame(
+            in: screen.frame,
             width: idleWidth,
             height: idleHeight
         )
 
-        panel = InteractiveNotchPanel(
+        let notchPanel = InteractiveNotchPanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+        panel = notchPanel
+        notchPanel.onCalculatorKeyDown = { [weak self] event in
+            guard let self,
+                  self.grassMenuModel.isPresented,
+                  self.grassMenuModel.selectedPage == .utility,
+                  self.grassMenuModel.selectedUtility == .calculator else { return false }
+            return self.grassUtilities.calculator.handleKeyEvent(event)
+        }
+        detachedIslandController = DetachableIslandController(utilities: grassUtilities, anchorWindow: panel)
 
         // Keep the notch above app windows without using the screen-saver
         // level, which can block system and app controls beneath its window.
@@ -3201,6 +3299,24 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         notch.addSubview(aiHost, positioned: .above, relativeTo: nil)
         grassAIHost = aiHost
 
+        let menuHost = GrassMenuHostingView(rootView: GrassMenuView(
+            model: grassMenuModel,
+            phoneMirror: phoneMirrorManager,
+            utilities: grassUtilities,
+            safeAreaTop: screen.safeAreaInsets.top,
+            allowsInput: true
+        ))
+        menuHost.frame = notch.bounds
+        menuHost.autoresizingMask = [.width, .height]
+        menuHost.safeAreaRegions = []
+        menuHost.wantsLayer = true
+        menuHost.layer?.backgroundColor = NSColor.clear.cgColor
+        menuHost.isHidden = true
+        menuHost.isGrassMenuActive = { [model = grassMenuModel] in model.isPresented }
+        menuHost.onOptionClick = { [weak self] in self?.toggleGrassMenu() }
+        notch.addSubview(menuHost, positioned: .above, relativeTo: aiHost)
+        grassMenuHost = menuHost
+
         developerHost = DeveloperHostingView(rootView: DeveloperOverlayRoot(
             manager: developerMode,
             snapshotProvider: { [weak self] in await self?.makeDeveloperSnapshot() ?? .environment },
@@ -3219,14 +3335,45 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         grassAIModel.onThinkingChange = { [weak self] thinking in
             self?.applyGrassAIThinkingState(thinking)
         }
+        grassMenuModel.onPresentationChange = { [weak self] presented in
+            self?.applyGrassMenuPresentation(presented)
+        }
+        grassUtilities.onLiveActivitiesChange = { [weak self] in
+            self?.refreshLiveActivityIslands()
+        }
+        grassUtilities.timer.onCompletion = { [weak self] in
+            self?.presentTimerAfterCompletion()
+        }
+        grassMenuModel.onDetachUtility = { [weak self] app in
+            self?.detachedIslandController?.detach(app) ?? false
+        }
+        detachedIslandController?.onDismiss = { [weak self] app in
+            self?.grassMenuModel.finishDetachedUtility(app)
+        }
+        detachedIslandController?.onReattach = { [weak self] app in
+            self?.grassMenuModel.reattachUtility(app)
+        }
+        grassMenuModel.onOpenNotchSettings = { [weak self] in
+            self?.openNotchSettingsFromGrassMenu()
+        }
+        grassMenuModel.onContentChange = { [weak self] in
+            guard let self else { return }
+            self.setGrassMenuPanelKeyMode(
+                self.grassMenuModel.isPresented && self.grassMenuModel.selectedPage == .utility
+            )
+            self.resizeWindow(animated: true)
+            self.syncMirroredNotches(animated: true)
+            self.refreshLiveActivityIslands()
+        }
+        phoneMirrorManager.connectAutomatically()
         developerMode.onPresentationChange = { [weak self] presentation in
             self?.applyDeveloperPresentation(presentation)
         }
         developerMode.onConsoleReveal = { [weak self] in
             self?.panel.makeKeyAndOrderFront(nil)
         }
-        notch.onDeveloperModeClick = { [weak self] shiftHeld in
-            self?.developerMode.handleOptionClick(shiftHeld: shiftHeld)
+        notch.onGrassMenuOptionClick = { [weak self] in
+            self?.toggleGrassMenu()
         }
         grassAIShortcut.onDoubleTap = { [weak self] in
             self?.presentGrassAIIfAllowed()
@@ -3303,6 +3450,12 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             self.notch.needsDisplay = true
             ChromeYouTube.performVideoAction("seek", seekSeconds: seconds, tabID: tabID, videoID: self.currentMediaVideoID)
         }
+        notch.onMediaSeekTo = { [weak self] seconds in
+            guard let self, let tabID = self.currentMediaTabID else { return }
+            self.notch.mediaCurrentTime = seconds
+            self.mediaTimeOverrideUntil = Date().addingTimeInterval(1.0)
+            ChromeYouTube.performVideoAction("seekTo", seekSeconds: seconds, tabID: tabID, videoID: self.currentMediaVideoID)
+        }
         notch.onMediaSelectVideo = { [weak self] direction in
             self?.selectYouTubeVideo(direction: direction)
         }
@@ -3322,12 +3475,6 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         if let displaySyncTimer { RunLoop.main.add(displaySyncTimer, forMode: .common) }
-        pointerAcceptanceTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateNotchPointerAcceptance() }
-        }
-        if let pointerAcceptanceTimer { RunLoop.main.add(pointerAcceptanceTimer, forMode: .common) }
-        updateNotchPointerAcceptance()
-
         panel.orderFrontRegardless()
 
         installAppActivationObserver()
@@ -3354,12 +3501,74 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             self.notch.startupSplash = false
             self.notch.expanded = false
             self.resizeWindow(animated: true)
+            self.presentPendingTimerCompletionIfPossible()
             self.startPolling()
         }
     }
 
     private func displayID(for screen: NSScreen) -> UInt32? {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+
+    private func refreshLiveActivityIslands(
+        animatePositionChanges: Bool = true,
+        positionAnimationDuration: TimeInterval = 0.36,
+        notchWidth: CGFloat? = nil
+    ) {
+        guard notch != nil else { return }
+        let presentationBlocked = notch.startupSplash
+            || developerMode.presentation != .closed
+            || grassAIModel.isPresented
+            || grassAIModel.isThinking
+        var activities = presentationBlocked ? [] : grassUtilities.activeActivities
+        if grassMenuModel.detachedUtility == .timer { activities.removeAll { $0 == .timer } }
+        if grassMenuModel.detachedUtility == .stopwatch { activities.removeAll { $0 == .stopwatch } }
+        if grassMenuModel.isPresented, grassMenuModel.selectedPage == .utility {
+            if grassMenuModel.selectedUtility == .timer { activities.removeAll { $0 == .timer } }
+            if grassMenuModel.selectedUtility == .stopwatch { activities.removeAll { $0 == .stopwatch } }
+        }
+
+        let screens = NSScreen.screens.compactMap { screen in
+            displayID(for: screen).map { (id: $0, screen: screen) }
+        }
+        liveActivityIslandController.update(
+            activities: activities,
+            screens: screens,
+            notchWidth: notchWidth ?? currentWidth + NotchView.upperCornerBleed * 2,
+            animatePositionChanges: animatePositionChanges,
+            positionAnimationDuration: positionAnimationDuration
+        ) { [weak self] activity in
+            guard let self,
+                  self.developerMode.presentation == .closed,
+                  !self.grassAIModel.isPresented,
+                  !self.grassAIModel.isThinking else { return }
+            self.grassMenuModel.presentUtilityForLiveActivity(activity.utility)
+            self.resizeWindow(animated: true)
+            self.syncMirroredNotches(animated: true)
+            self.refreshLiveActivityIslands()
+        }
+    }
+
+    private func presentTimerAfterCompletion() {
+        pendingTimerCompletionPresentation = true
+        presentPendingTimerCompletionIfPossible()
+    }
+
+    private func presentPendingTimerCompletionIfPossible() {
+        guard pendingTimerCompletionPresentation,
+              !notch.startupSplash,
+              developerMode.presentation == .closed,
+              !grassAIModel.isPresented,
+              !grassAIModel.isThinking else { return }
+        pendingTimerCompletionPresentation = false
+        if grassMenuModel.detachedUtility == .timer {
+            detachedIslandController?.reattachUtility(.timer)
+            return
+        }
+        grassMenuModel.presentUtilityForLiveActivity(.timer)
+        resizeWindow(animated: true)
+        syncMirroredNotches(animated: true)
+        refreshLiveActivityIslands()
     }
 
     private func refreshMirroredDisplays() {
@@ -3393,13 +3602,14 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             let mirrorView = NotchView(frame: NSRect(origin: .zero, size: frame.size))
             mirrorView.autoresizingMask = [.width, .height]
             mirrorView.isMirror = true
-            mirrorView.onDeveloperModeClick = notch.onDeveloperModeClick
+            mirrorView.onGrassMenuOptionClick = notch.onGrassMenuOptionClick
             mirrorView.onControlClickGrassAI = notch.onControlClickGrassAI
             mirrorView.onAcceptWhatsAppCall = notch.onAcceptWhatsAppCall
             mirrorView.onDeclineWhatsAppCall = notch.onDeclineWhatsAppCall
             mirrorView.onToggleWhatsAppMute = notch.onToggleWhatsAppMute
             mirrorView.onMediaPlayPause = notch.onMediaPlayPause
             mirrorView.onMediaSeek = notch.onMediaSeek
+            mirrorView.onMediaSeekTo = notch.onMediaSeekTo
             mirrorView.onMediaSelectVideo = notch.onMediaSelectVideo
             mirrorView.onClearIncomingMessages = notch.onClearIncomingMessages
             mirrorView.onMirrorToggleExpanded = { [weak self] in
@@ -3420,6 +3630,21 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             mirrorAIHost.isGrassAIActive = { [model = grassAIModel] in model.isPresented }
             mirrorView.addSubview(mirrorAIHost, positioned: .above, relativeTo: nil)
 
+            let mirrorMenuHost = GrassMenuHostingView(rootView: GrassMenuView(
+                model: grassMenuModel,
+                phoneMirror: phoneMirrorManager,
+                utilities: grassUtilities,
+                safeAreaTop: screen.safeAreaInsets.top,
+                allowsInput: true
+            ))
+            mirrorMenuHost.frame = mirrorView.bounds
+            mirrorMenuHost.autoresizingMask = [.width, .height]
+            mirrorMenuHost.safeAreaRegions = []
+            mirrorMenuHost.isHidden = true
+            mirrorMenuHost.isGrassMenuActive = { [model = grassMenuModel] in model.isPresented }
+            mirrorMenuHost.onOptionClick = { [weak self] in self?.toggleGrassMenu() }
+            mirrorView.addSubview(mirrorMenuHost, positioned: .above, relativeTo: mirrorAIHost)
+
             let mirrorHost = DeveloperHostingView(rootView: DeveloperOverlayRoot(
                 manager: developerMode,
                 snapshotProvider: { [weak self] in await self?.makeDeveloperSnapshot() ?? .environment },
@@ -3429,15 +3654,18 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
                 returnToDefault: { [weak self] in self?.developerReturnToDefaultState() }
             ))
             mirrorHost.safeAreaRegions = []
-            mirrorHost.onDeveloperClick = notch.onDeveloperModeClick
+            mirrorHost.onDeveloperClick = { [weak self] shiftHeld in
+                self?.developerMode.handleOptionClick(shiftHeld: shiftHeld)
+            }
             mirroredNotches[identifier] = MirroredNotchDisplay(
                 displayID: identifier, panel: mirrorPanel, view: mirrorView,
-                grassAIHost: mirrorAIHost, developerHost: mirrorHost
+                grassAIHost: mirrorAIHost, grassMenuHost: mirrorMenuHost, developerHost: mirrorHost
             )
             mirrorPanel.orderFrontRegardless()
         }
         syncMirroredNotches(animated: false)
         applyDeveloperPresentationToMirrors(developerMode.presentation)
+        refreshLiveActivityIslands()
     }
 
     private func syncMirroredNotches(animated: Bool, durationOverride: TimeInterval? = nil) {
@@ -3464,21 +3692,6 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 mirror.panel.setFrame(frame, display: true)
             }
-        }
-    }
-
-    private func updateNotchPointerAcceptance() {
-        let developerPanelIsInteractive = developerMode.presentation != .closed
-        let cursorLocation = NSEvent.mouseLocation
-        if let panel, let notch {
-            let shouldIgnore = !developerPanelIsInteractive
-                && !notch.shouldAcceptPointer(at: notch.convert(panel.convertPoint(fromScreen: cursorLocation), from: nil))
-            if panel.ignoresMouseEvents != shouldIgnore { panel.ignoresMouseEvents = shouldIgnore }
-        }
-        for mirror in mirroredNotches.values {
-            let shouldIgnore = !developerPanelIsInteractive
-                && !mirror.view.shouldAcceptPointer(at: mirror.view.convert(mirror.panel.convertPoint(fromScreen: cursorLocation), from: nil))
-            if mirror.panel.ignoresMouseEvents != shouldIgnore { mirror.panel.ignoresMouseEvents = shouldIgnore }
         }
     }
 
@@ -3514,13 +3727,78 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         }
         resizeWindow(animated: true)
         syncMirroredNotches(animated: true)
+        refreshLiveActivityIslands()
+        if !presented {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+                self?.presentPendingTimerCompletionIfPossible()
+            }
+        }
     }
 
     private func presentGrassAIIfAllowed() {
         guard developerMode.presentation == .closed,
               !grassAIModel.isPresented,
               !grassAIModel.isThinking else { return }
+        grassMenuModel.dismiss()
         grassAIModel.present()
+    }
+
+    private func toggleGrassMenu() {
+        guard developerMode.presentation == .closed,
+              !grassAIModel.isPresented,
+              !grassAIModel.isThinking,
+              !notch.startupSplash else { return }
+        grassMenuModel.toggle()
+    }
+
+    private func applyGrassMenuPresentation(_ presented: Bool) {
+        guard developerMode.presentation == .closed,
+              !grassAIModel.isPresented,
+              !grassAIModel.isThinking,
+              let panel else { return }
+
+        notch.grassMenuPresented = presented
+        grassMenuHost?.isHidden = !presented
+        panel.ignoresMouseEvents = false
+        setGrassMenuPanelKeyMode(presented && grassMenuModel.selectedPage == .utility)
+
+        for mirror in mirroredNotches.values {
+            mirror.view.grassMenuPresented = presented
+            mirror.grassMenuHost.isHidden = !presented
+            mirror.panel.ignoresMouseEvents = false
+        }
+
+        resizeWindow(animated: true)
+        syncMirroredNotches(animated: true)
+        refreshLiveActivityIslands()
+    }
+
+    private func setGrassMenuPanelKeyMode(_ active: Bool) {
+        guard let panel,
+              developerMode.presentation == .closed,
+              !grassAIModel.isPresented,
+              !grassAIModel.isThinking else { return }
+        var styleMask = panel.styleMask
+        if active {
+            styleMask.remove(.nonactivatingPanel)
+            panel.styleMask = styleMask
+            panel.becomesKeyOnlyIfNeeded = false
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        } else {
+            if panel.isKeyWindow { panel.resignKey() }
+            styleMask.insert(.nonactivatingPanel)
+            panel.styleMask = styleMask
+            panel.becomesKeyOnlyIfNeeded = true
+            panel.level = .statusBar
+        }
+    }
+
+    private func openNotchSettingsFromGrassMenu() {
+        guard developerMode.presentation == .closed else { return }
+        returnToGrassMenuAfterSettings = true
+        grassMenuModel.dismiss()
+        developerMode.handleOptionClick(shiftHeld: false)
     }
 
     private func reactivateGrassAIPrompt() {
@@ -3639,6 +3917,17 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
         resizeWindow(animated: true, durationOverride: transitionDuration)
         DeveloperEventLog.shared.append("Console", presentation == .console ? "Developer console opened" : "Developer authentication panel shown")
         applyDeveloperPresentationToMirrors(presentation)
+        if presentation == .closed, returnToGrassMenuAfterSettings {
+            returnToGrassMenuAfterSettings = false
+            DispatchQueue.main.async { [weak self] in
+                self?.grassMenuModel.present()
+            }
+        }
+        if presentation == .closed {
+            DispatchQueue.main.asyncAfter(deadline: .now() + transitionDuration) { [weak self] in
+                self?.presentPendingTimerCompletionIfPossible()
+            }
+        }
     }
 
     private func installDeveloperSessionObservers() {
@@ -3872,6 +4161,7 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleAppActivation(_ application: NSRunningApplication) {
+        detachedIslandController?.recoverInterruptedDetachmentIfNeeded()
         guard application.processIdentifier != NSRunningApplication.current.processIdentifier,
               application.bundleIdentifier == nil || application.bundleIdentifier != Bundle.main.bundleIdentifier,
               !notch.whatsAppCallActive,
@@ -4522,8 +4812,17 @@ final class GrassIslandAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func pollBluetoothState() {
-        guard let isPoweredOn = SystemBluetooth.isPoweredOn() else { return }
-        recordBluetoothPowerState(isPoweredOn)
+        guard !bluetoothPollInProgress else { return }
+        bluetoothPollInProgress = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let isPoweredOn = SystemBluetooth.isPoweredOn()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.bluetoothPollInProgress = false
+                guard let isPoweredOn else { return }
+                self.recordBluetoothPowerState(isPoweredOn)
+            }
+        }
     }
 
     private func recordBluetoothPowerState(_ isPoweredOn: Bool, fromControllerNotification: Bool = false) {
@@ -4835,8 +5134,12 @@ private func animateVolumeHUD(to target: CGFloat) {
             // Preserve the current state on a genuine AppleScript failure.
             guard let mediaItems else { return }
             self.youtubeMediaItems = mediaItems
+            let videoCountChanged = self.notch.mediaVideoCount != mediaItems.count
             self.notch.mediaVideoCount = mediaItems.count
             self.notch.mediaAnyVideoPlaying = mediaItems.contains(where: \.playing)
+            if videoCountChanged && self.notch.mediaPlaying && !self.notch.expanded {
+                self.resizeWindow(animated: true)
+            }
 
             guard !mediaItems.isEmpty else {
                 guard self.currentMediaTabID != nil else { return }
@@ -4986,7 +5289,7 @@ private func animateVolumeHUD(to target: CGFloat) {
     private func resizeWindow(animated: Bool = true, durationOverride: TimeInterval? = nil) {
         guard let screen = NSScreen.notchScreen else { return }
 
-        let targetWidth: CGFloat
+        var targetWidth: CGFloat
         let targetHeight: CGFloat
 
         if notch.startupSplash {
@@ -4998,6 +5301,17 @@ private func animateVolumeHUD(to target: CGFloat) {
         } else if developerMode.presentation == .authenticating || developerMode.presentation.isDeveloperMessage {
             targetWidth = 410
             targetHeight = 168
+        } else if grassMenuModel.isPresented {
+            if grassMenuModel.selectedPage == .phone {
+                targetWidth = 360
+                targetHeight = max(286, idleHeight + 220)
+            } else if grassMenuModel.selectedPage == .utility {
+                targetWidth = 448
+                targetHeight = max(380, idleHeight + 300)
+            } else {
+                targetWidth = 286
+                targetHeight = max(210, idleHeight + 170)
+            }
         } else if grassAIModel.isThinking {
             targetWidth = idleWidth
             targetHeight = idleHeight
@@ -5043,7 +5357,10 @@ private func animateVolumeHUD(to target: CGFloat) {
             targetWidth = activeWidth
             targetHeight = 218
         } else if notch.mediaPlaying {
-            targetWidth = CaptureActivityState.compactMediaWidth(for: notch.captureActivity, baseWidth: activeWidth)
+            targetWidth = CaptureActivityState.compactYouTubeWidth(
+                for: notch.captureActivity,
+                videoCount: notch.mediaVideoCount
+            )
             targetHeight = idleHeight
         } else if notch.expanded
                     || notch.chargingIndicatorActive
@@ -5064,9 +5381,8 @@ private func animateVolumeHUD(to target: CGFloat) {
         // state, so the notification grows down from the original notch.
         let panelY = screen.frame.maxY - windowHeight
 
-        let frame = NSRect(
-            x: screen.frame.midX - targetWidth / 2,
-            y: panelY,
+        let frame = NotchView.notchFrame(
+            in: screen.frame,
             width: targetWidth,
             height: windowHeight
         )
@@ -5074,7 +5390,8 @@ private func animateVolumeHUD(to target: CGFloat) {
         guard abs(currentWidth - targetWidth) > 1
                 || abs(currentHeight - windowHeight) > 1
                 || abs(panel.frame.origin.y - panelY) > 1
-                || abs(panel.frame.origin.x - frame.origin.x) > 1 else {
+                || abs(panel.frame.origin.x - frame.origin.x) > 1
+                || abs(panel.frame.width - frame.width) > 1 else {
             syncMirroredNotches(animated: false)
             return
         }
@@ -5085,21 +5402,27 @@ private func animateVolumeHUD(to target: CGFloat) {
         currentWidth = targetWidth
         currentHeight = windowHeight
 
+        let settings = DeveloperAnimationSettings.shared
+        let isOpening = windowHeight > panel.frame.height || targetWidth > panel.frame.width
+        let duration = isOpening
+            ? settings.effectiveExpansionDuration
+            : settings.effectiveCollapseDuration
+        let animationDuration = durationOverride ?? (notch.appSwitchIcon != nil
+            ? appSwitchExpansionDuration
+            : duration)
+        refreshLiveActivityIslands(
+            animatePositionChanges: animated && !settings.reduceMotion && duration > 0,
+            positionAnimationDuration: animationDuration,
+            notchWidth: frame.width
+        )
+
         if animated {
-            let isOpening = windowHeight > panel.frame.height || targetWidth > panel.frame.width
-            let settings = DeveloperAnimationSettings.shared
-            let duration = isOpening
-                ? settings.effectiveExpansionDuration
-                : settings.effectiveCollapseDuration
             if settings.reduceMotion || duration == 0 {
                 panel.setFrame(frame, display: true)
                 notch.needsDisplay = true
                 syncMirroredNotches(animated: false)
                 return
             }
-            let animationDuration = durationOverride ?? (notch.appSwitchIcon != nil
-                ? appSwitchExpansionDuration
-                : duration)
             animateNotchFrame(
                 frame,
                 from: startingFrame,
@@ -5179,12 +5502,12 @@ private func animateVolumeHUD(to target: CGFloat) {
     // MARK: Cleanup
 
     func applicationWillTerminate(_ notification: Notification) {
+        grassUtilities.flushPendingSaves()
         developerMode.lockDeveloperMode(reason: .applicationTerminated)
+        phoneMirrorManager.shutdown()
         grassAIShortcut.invalidate()
         displaySyncTimer?.invalidate()
         displaySyncTimer = nil
-        pointerAcceptanceTimer?.invalidate()
-        pointerAcceptanceTimer = nil
         for mirror in mirroredNotches.values { mirror.panel.orderOut(nil) }
         mirroredNotches.removeAll()
         timers.forEach { $0.invalidate() }

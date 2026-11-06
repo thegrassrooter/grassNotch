@@ -443,12 +443,12 @@ struct GrassAIView: View {
                 .blendMode(.screen)
             }
         }
-        .overlay(alignment: .top) {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .strokeBorder(grassGradient.opacity(0.34), lineWidth: 0.7)
+        .overlay {
+            NotchContourShape(bottomCornerRadius: 26)
+                .stroke(grassGradient.opacity(0.34), lineWidth: 0.7)
                 .allowsHitTesting(false)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .clipShape(NotchContourShape(bottomCornerRadius: 26))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.isThinking)
     }
 
